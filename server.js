@@ -196,6 +196,98 @@ app.post("/api/publish-minisite", async (req, res) => {
 });
 
 // =======================================================
+// ✅ CONVERT → PUBLISH (S3 CONVERTER ENTRYPOINT)
+// POST /api/convert-s3
+// body: { projectId, snapshotKey }
+// - validates snapshot exists (via storage.js getJson)
+// - then publishes a shareId player (reuses publish logic)
+// =======================================================
+app.post("/api/convert-s3", async (req, res) => {
+  try {
+    if (!s3) return res.status(500).json({ ok: false, error: "S3 not configured (missing BUCKET/REGION)" });
+    if (!PUBLIC_BASE) return res.status(500).json({ ok: false, error: "Missing PUBLIC_PLAYERS_BASE_URL on Render" });
+
+    const { projectId, snapshotKey } = req.body || {};
+    if (!projectId || !snapshotKey) {
+      return res.status(400).json({ ok: false, error: "Missing projectId or snapshotKey" });
+    }
+
+    // ✅ ensure snapshot exists (throws if missing)
+    await getJson(snapshotKey);
+
+    // Publish (same as /api/publish-minisite)
+    const shareId = crypto.randomBytes(8).toString("hex");
+    const baseKey = `public/players/${shareId}`;
+    const manifestKey = `${baseKey}/manifest.json`;
+    const indexKey = `${baseKey}/index.html`;
+
+    const manifest = {
+      ok: true,
+      projectId,
+      snapshotKey,
+      shareId,
+      publishedAt: new Date().toISOString(),
+      version: 1,
+    };
+
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: manifestKey,
+        Body: Buffer.from(JSON.stringify(manifest, null, 2)),
+        ContentType: "application/json; charset=utf-8",
+        CacheControl: "no-store",
+      })
+    );
+
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Smart Bridge Minisite</title>
+</head>
+<body>
+  <pre id="out">Loading manifest…</pre>
+  <script>
+    fetch("./manifest.json")
+      .then(r => r.json())
+      .then(m => { document.getElementById("out").textContent = JSON.stringify(m, null, 2); })
+      .catch(err => { document.getElementById("out").textContent = String(err); });
+  </script>
+</body>
+</html>`;
+
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: indexKey,
+        Body: Buffer.from(html),
+        ContentType: "text/html; charset=utf-8",
+        CacheControl: "no-store",
+      })
+    );
+
+    const publicUrl = `${PUBLIC_BASE}/${baseKey}/index.html`;
+
+    return res.json({
+      ok: true,
+      projectId,
+      snapshotKey,
+      shareId,
+      publicUrl,
+      outputs: [
+        { label: "Manifest", key: manifestKey, publicUrl },
+        { label: "Index", key: indexKey, publicUrl },
+      ],
+    });
+  } catch (err) {
+    console.error("CONVERT-S3 ERROR:", err);
+    return res.status(500).json({ ok: false, error: err?.message || String(err) });
+  }
+});
+
+// =======================================================
 // MASTER SAVE (WRITE)
 // expects { projectId, project }
 // =======================================================
