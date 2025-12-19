@@ -1,0 +1,59 @@
+import React from "react";
+import { Routes, Route, Navigate } from "react-router-dom";
+
+import SideNav from "../components/SideNav.jsx";
+import TopBar from "../components/TopBar.jsx";
+
+import Login from "../pages/Login.jsx";
+import Admin from "../pages/Admin.jsx";
+import Producer from "../pages/Producer.jsx";
+import Projects from "../pages/Projects.jsx";
+import Project from "../pages/Project.jsx";
+import ExportTools from "../pages/ExportTools.jsx";
+
+import MiniSiteLayout from "../minisite/MiniSiteLayout.jsx";
+import Catalog from "../minisite/Catalog.jsx";
+import Album from "../minisite/Album.jsx";
+import NFTMix from "../minisite/NFTMix.jsx";
+import Songs from "../minisite/Songs.jsx";
+import Meta from "../minisite/Meta.jsx";
+
+export default function App() {
+  return (
+    <div style={{ display: "flex", minHeight: "100vh" }}>
+      {/* LEFT: Side Nav (admin / internal only) */}
+      <SideNav />
+
+      {/* RIGHT: Main content */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+        <TopBar />
+
+        <div style={{ flex: 1, padding: 24 }}>
+          <Routes>
+            {/* Default */}
+            <Route path="/" element={<Navigate to="/producer" />} />
+
+            {/* Auth / Admin */}
+            <Route path="/login" element={<Login />} />
+            <Route path="/admin" element={<Admin />} />
+
+            {/* Internal producer workflow */}
+            <Route path="/producer" element={<Producer />} />
+            <Route path="/projects" element={<Projects />} />
+            <Route path="/project/:projectId" element={<Project />} />
+            <Route path="/export-tools" element={<ExportTools />} />
+
+            {/* MINI-SITE (magic link / worksheet) */}
+            <Route path="/minisite/:projectId" element={<MiniSiteLayout />}>
+              <Route path="catalog" element={<Catalog />} />
+              <Route path="album" element={<Album />} />
+              <Route path="nft-mix" element={<NFTMix />} />
+              <Route path="songs" element={<Songs />} />
+              <Route path="meta" element={<Meta />} />
+            </Route>
+          </Routes>
+        </div>
+      </div>
+    </div>
+  );
+}
