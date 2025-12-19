@@ -6,7 +6,7 @@ const cors = require("cors");
 const crypto = require("crypto");
 const path = require("path");
 
-// For JSON master-save storage (existing helper)
+// For JSON master-save storage
 const { putJson, getJson } = require("./storage.js");
 
 // AWS SDK
@@ -18,7 +18,6 @@ const PORT = process.env.PORT || 10000;
 
 // ---------- middleware ----------
 app.use(cors());
-// ✅ bumped limit so misc uploads/slideshows don't instantly fail (still not meant for huge videos)
 app.use(express.json({ limit: process.env.JSON_LIMIT || "60mb" }));
 
 // ---------- env / s3 ----------
@@ -34,7 +33,6 @@ const s3 = BUCKET && REGION ? new S3Client({ region: REGION }) : null;
 
 // ---------- helpers ----------
 function stripDataUrlPrefix(b64) {
-  // Handles data:image/...;base64,  data:application/pdf;base64,  data:video/mp4;base64, etc.
   return String(b64 || "").replace(/^data:.*;base64,/, "");
 }
 
@@ -50,6 +48,9 @@ function defaultMimeForExt(ext) {
   if (e === "webp") return "image/webp";
   if (e === "gif") return "image/gif";
   if (e === "pdf") return "application/pdf";
+  if (e === "mp3") return "audio/mpeg";
+  if (e === "wav") return "audio/wav";
+  if (e === "m4a") return "audio/mp4";
   if (e === "mp4") return "video/mp4";
   if (e === "mov") return "video/quicktime";
   if (e === "webm") return "video/webm";
@@ -97,7 +98,7 @@ app.get("/", (_req, res) => {
 // ---------- health ----------
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
-// ✅ deploy proof endpoint (must exist after deploy)
+// ✅ deploy proof endpoint
 app.get("/api/publish-proof", (_req, res) => {
   res.json({
     ok: true,
@@ -126,14 +127,10 @@ app.get("/api/version", (_req, res) => {
 app.post("/api/publish-minisite", async (req, res) => {
   try {
     if (!s3) return res.status(500).json({ ok: false, error: "S3 not configured (missing BUCKET/REGION)" });
-    if (!PUBLIC_BASE) {
-      return res.status(500).json({ ok: false, error: "Missing PUBLIC_PLAYERS_BASE_URL on Render" });
-    }
+    if (!PUBLIC_BASE) return res.status(500).json({ ok: false, error: "Missing PUBLIC_PLAYERS_BASE_URL on Render" });
 
     const { projectId, snapshotKey } = req.body || {};
-    if (!projectId || !snapshotKey) {
-      return res.status(400).json({ ok: false, error: "Missing projectId or snapshotKey" });
-    }
+    if (!projectId || !snapshotKey) return res.status(400).json({ ok: false, error: "Missing projectId or snapshotKey" });
 
     const shareId = crypto.randomBytes(8).toString("hex");
     const baseKey = `public/players/${shareId}`;
@@ -196,111 +193,13 @@ app.post("/api/publish-minisite", async (req, res) => {
 });
 
 // =======================================================
-// ✅ CONVERT → PUBLISH (S3 CONVERTER ENTRYPOINT)
-// POST /api/convert-s3
-// body: { projectId, snapshotKey }
-// - validates snapshot exists (via storage.js getJson)
-// - then publishes a shareId player (reuses publish logic)
-// =======================================================
-app.post("/api/convert-s3", async (req, res) => {
-  try {
-    if (!s3) return res.status(500).json({ ok: false, error: "S3 not configured (missing BUCKET/REGION)" });
-    if (!PUBLIC_BASE) return res.status(500).json({ ok: false, error: "Missing PUBLIC_PLAYERS_BASE_URL on Render" });
-
-    const { projectId, snapshotKey } = req.body || {};
-    if (!projectId || !snapshotKey) {
-      return res.status(400).json({ ok: false, error: "Missing projectId or snapshotKey" });
-    }
-
-    // ✅ ensure snapshot exists (throws if missing)
-    await getJson(snapshotKey);
-
-    // Publish (same as /api/publish-minisite)
-    const shareId = crypto.randomBytes(8).toString("hex");
-    const baseKey = `public/players/${shareId}`;
-    const manifestKey = `${baseKey}/manifest.json`;
-    const indexKey = `${baseKey}/index.html`;
-
-    const manifest = {
-      ok: true,
-      projectId,
-      snapshotKey,
-      shareId,
-      publishedAt: new Date().toISOString(),
-      version: 1,
-    };
-
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: BUCKET,
-        Key: manifestKey,
-        Body: Buffer.from(JSON.stringify(manifest, null, 2)),
-        ContentType: "application/json; charset=utf-8",
-        CacheControl: "no-store",
-      })
-    );
-
-    const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Smart Bridge Minisite</title>
-</head>
-<body>
-  <pre id="out">Loading manifest…</pre>
-  <script>
-    fetch("./manifest.json")
-      .then(r => r.json())
-      .then(m => { document.getElementById("out").textContent = JSON.stringify(m, null, 2); })
-      .catch(err => { document.getElementById("out").textContent = String(err); });
-  </script>
-</body>
-</html>`;
-
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: BUCKET,
-        Key: indexKey,
-        Body: Buffer.from(html),
-        ContentType: "text/html; charset=utf-8",
-        CacheControl: "no-store",
-      })
-    );
-
-    const publicUrl = `${PUBLIC_BASE}/${baseKey}/index.html`;
-
-    return res.json({
-      ok: true,
-      projectId,
-      snapshotKey,
-      shareId,
-      publicUrl,
-      outputs: [
-        { label: "Manifest", key: manifestKey, publicUrl },
-        { label: "Index", key: indexKey, publicUrl },
-      ],
-    });
-  } catch (err) {
-    console.error("CONVERT-S3 ERROR:", err);
-    return res.status(500).json({ ok: false, error: err?.message || String(err) });
-  }
-});
-
-// =======================================================
 // MASTER SAVE (WRITE)
 // expects { projectId, project }
 // =======================================================
 app.post("/api/master-save", async (req, res) => {
   try {
     const { projectId, project } = req.body || {};
-
-    if (!projectId || !project) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing projectId or project",
-      });
-    }
+    if (!projectId || !project) return res.status(400).json({ ok: false, error: "Missing projectId or project" });
 
     const now = new Date().toISOString();
     const ts = now.replace(/[:.]/g, "-");
@@ -309,29 +208,13 @@ app.post("/api/master-save", async (req, res) => {
     const snapshotKey = `${basePath}/snapshots/${ts}.json`;
     const latestKey = `${basePath}/latest.json`;
 
-    await putJson(snapshotKey, {
-      projectId,
-      savedAt: now,
-      project,
-    });
+    await putJson(snapshotKey, { projectId, savedAt: now, project });
+    await putJson(latestKey, { projectId, latestSnapshotKey: snapshotKey, savedAt: now });
 
-    await putJson(latestKey, {
-      projectId,
-      latestSnapshotKey: snapshotKey,
-      savedAt: now,
-    });
-
-    res.json({
-      ok: true,
-      snapshotKey,
-      latestKey,
-    });
+    return res.json({ ok: true, snapshotKey, latestKey });
   } catch (err) {
     console.error("MASTER SAVE ERROR:", err);
-    res.status(500).json({
-      ok: false,
-      error: err?.message || String(err),
-    });
+    return res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
 
@@ -341,24 +224,15 @@ app.post("/api/master-save", async (req, res) => {
 app.get("/api/master-save/latest/:projectId", async (req, res) => {
   try {
     const { projectId } = req.params;
-
     const latestKey = `storage/projects/${projectId}/producer_returns/latest.json`;
 
     const latest = await getJson(latestKey);
     const snapshot = await getJson(latest.latestSnapshotKey);
 
-    res.json({
-      ok: true,
-      latestKey,
-      latest,
-      snapshot,
-    });
+    return res.json({ ok: true, latestKey, latest, snapshot });
   } catch (err) {
     console.error("READBACK ERROR:", err);
-    res.status(500).json({
-      ok: false,
-      error: err?.message || String(err),
-    });
+    return res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
 
@@ -371,9 +245,7 @@ app.post("/api/upload-mp3", async (req, res) => {
     if (!s3) return res.status(500).json({ ok: false, error: "S3 not configured (missing BUCKET/REGION)" });
 
     const { projectId, trackId, base64, fileName } = req.body || {};
-    if (!projectId || !trackId || !base64) {
-      return res.status(400).json({ ok: false, error: "Missing projectId, trackId, or base64" });
-    }
+    if (!projectId || !trackId || !base64) return res.status(400).json({ ok: false, error: "Missing projectId, trackId, or base64" });
 
     const cleaned = String(base64).replace(/^data:audio\/\w+;base64,/, "");
     const buf = Buffer.from(cleaned, "base64");
@@ -391,49 +263,38 @@ app.post("/api/upload-mp3", async (req, res) => {
       })
     );
 
-    res.json({
-      ok: true,
-      s3Key: key,
-      etag: out.ETag || null,
-      fileName: fileName || null,
-      uploadedAt: new Date().toISOString(),
-    });
+    return res.json({ ok: true, s3Key: key, etag: out.ETag || null, fileName: fileName || null, uploadedAt: new Date().toISOString() });
   } catch (err) {
     console.error("UPLOAD MP3 ERROR:", err);
-    res.status(500).json({ ok: false, error: err?.message || String(err) });
+    return res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
 
 // =======================================================
-// ✅ UPLOAD COVER (NEW) - matches your frontend uploadCover.js
-// POST /api/upload-cover { projectId, fileName, base64 }
+// ✅ UPLOAD COVER
+// POST /api/upload-cover { projectId, fileName, base64, mimeType? }
 // =======================================================
 app.post("/api/upload-cover", async (req, res) => {
   try {
     if (!s3) return res.status(500).json({ ok: false, error: "S3 not configured (missing BUCKET/REGION)" });
 
     const { projectId, fileName, base64, mimeType } = req.body || {};
-    if (!projectId || !fileName || !base64) {
-      return res.status(400).send("Missing projectId, fileName, or base64");
-    }
+    if (!projectId || !fileName || !base64) return res.status(400).json({ ok: false, error: "Missing projectId, fileName, or base64" });
 
     const ext = safeExtFromFileName(fileName);
     const ct = (mimeType || "").trim() || defaultMimeForExt(ext) || "application/octet-stream";
-
-    // overwrite-style key so re-upload replaces cover
     const key = `storage/projects/${projectId}/album/cover/cover.${ext}`;
 
     const { etag } = await putBase64ObjectToS3({ key, base64, contentType: ct });
-
     return res.json({ ok: true, s3Key: key, etag, uploadedAt: new Date().toISOString() });
   } catch (err) {
     console.error("UPLOAD COVER ERROR:", err);
-    return res.status(500).send(err?.message || String(err));
+    return res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
 
 // =======================================================
-// ✅ UPLOAD SLIDESHOW (NEW)
+// ✅ UPLOAD SLIDESHOW
 // POST /api/upload-slideshow { projectId, fileName, base64, mimeType? }
 // =======================================================
 app.post("/api/upload-slideshow", async (req, res) => {
@@ -441,28 +302,23 @@ app.post("/api/upload-slideshow", async (req, res) => {
     if (!s3) return res.status(500).json({ ok: false, error: "S3 not configured (missing BUCKET/REGION)" });
 
     const { projectId, fileName, base64, mimeType } = req.body || {};
-    if (!projectId || !fileName || !base64) {
-      return res.status(400).send("Missing projectId, fileName, or base64");
-    }
+    if (!projectId || !fileName || !base64) return res.status(400).json({ ok: false, error: "Missing projectId, fileName, or base64" });
 
     const ext = safeExtFromFileName(fileName);
     const ct = (mimeType || "").trim() || defaultMimeForExt(ext) || "application/octet-stream";
-
-    // keep one current slideshow; overwrite by name
     const safeName = makeKeySafeName(fileName);
     const key = `storage/projects/${projectId}/album/slideshow/${safeName}`;
 
     const { etag } = await putBase64ObjectToS3({ key, base64, contentType: ct });
-
     return res.json({ ok: true, s3Key: key, etag, uploadedAt: new Date().toISOString() });
   } catch (err) {
     console.error("UPLOAD SLIDESHOW ERROR:", err);
-    return res.status(500).send(err?.message || String(err));
+    return res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
 
 // =======================================================
-// ✅ UPLOAD MISC (NEW)
+// ✅ UPLOAD MISC (THIS FIXES YOUR 404)
 // POST /api/upload-misc { projectId, fileName, base64, mimeType? }
 // =======================================================
 app.post("/api/upload-misc", async (req, res) => {
@@ -470,28 +326,25 @@ app.post("/api/upload-misc", async (req, res) => {
     if (!s3) return res.status(500).json({ ok: false, error: "S3 not configured (missing BUCKET/REGION)" });
 
     const { projectId, fileName, base64, mimeType } = req.body || {};
-    if (!projectId || !fileName || !base64) {
-      return res.status(400).send("Missing projectId, fileName, or base64");
-    }
+    if (!projectId || !fileName || !base64) return res.status(400).json({ ok: false, error: "Missing projectId, fileName, or base64" });
 
     const ext = safeExtFromFileName(fileName);
     const ct = (mimeType || "").trim() || defaultMimeForExt(ext) || "application/octet-stream";
 
     const safeName = makeKeySafeName(fileName);
     const nonce = crypto.randomBytes(6).toString("hex");
-    const key = `storage/projects/${projectId}/album/misc/${Date.now()}_${nonce}_${safeName}`;
+    const key = `storage/projects/${projectId}/catalog/uploads/${Date.now()}_${nonce}_${safeName}`;
 
     const { etag } = await putBase64ObjectToS3({ key, base64, contentType: ct });
-
     return res.json({ ok: true, s3Key: key, etag, uploadedAt: new Date().toISOString() });
   } catch (err) {
     console.error("UPLOAD MISC ERROR:", err);
-    return res.status(500).send(err?.message || String(err));
+    return res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
 
 // =======================================================
-// PRESIGNED PLAYBACK/VIEW URL (works for audio/images/pdf/video)
+// PRESIGNED PLAYBACK/VIEW URL
 // GET /api/playback-url?s3Key=...
 // =======================================================
 app.get("/api/playback-url", async (req, res) => {
@@ -512,10 +365,10 @@ app.get("/api/playback-url", async (req, res) => {
       { expiresIn: 60 * 10 }
     );
 
-    res.json({ ok: true, url });
+    return res.json({ ok: true, url });
   } catch (err) {
     console.error("PLAYBACK URL ERROR:", err);
-    res.status(500).json({ ok: false, error: err?.message || String(err) });
+    return res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
 
