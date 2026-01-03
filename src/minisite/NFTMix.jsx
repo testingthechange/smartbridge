@@ -1,5 +1,5 @@
 // src/minisite/NFTMix.jsx
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 
 const SONG_COUNT = 9;
@@ -9,60 +9,328 @@ export default function NFTMix() {
   const [searchParams] = useSearchParams();
   const token = searchParams.get("token") || "";
 
-  // Later: load from Catalog JSON (titles + Version A urls + cover + meta)
-  const [catalogMeta] = useState({
-    albumTitle: "",
-    coverUrl: "",
-  });
+  const API_BASE = String(import.meta.env.VITE_BACKEND_URL || "").replace(/\/+$/, "");
+  const storageKey = (k) => `sb:${projectId}:nftmix:${k}`;
 
-  // Placeholder until Catalog JSON: keep titles empty so we don’t print “Song 2 — Title”
-  const [songs] = useState(() =>
-    Array.from({ length: SONG_COUNT }).map((_, i) => ({
-      number: i + 1,
-      title: "",
-      aUrl: "",
-      aFileName: "",
-    }))
-  );
+  const [loading, setLoading] = useState(false);
+  const [loadErr, setLoadErr] = useState("");
 
-  // 1→2, 2→3, ... 8→9
+  // songs in album playlist order: [{slot, title, aS3Key, aUrl}]
+  const [songs, setSongs] = useState([]);
+
+  // glue lines (album order)
+  // IMPORTANT: we store bridge in S3, not base64
+  // [{id, fromSlot, toSlot, locked, bridgeFileName, bridgeS3Key, bridgePlaybackUrl}]
   const [glueLines, setGlueLines] = useState(() =>
     Array.from({ length: SONG_COUNT - 1 }).map((_, i) => ({
       id: `glue-${i + 1}-to-${i + 2}`,
-      from: i + 1,
-      to: i + 2,
-      fromVer: "A",
-      toVer: "A",
-      bridgeFileName: "",
-      bridgeUrl: "",
+      fromSlot: i + 1,
+      toSlot: i + 2,
       locked: false,
-      abcPreviewUrl: "", // later from converter
+      bridgeFileName: "",
+      bridgeS3Key: "",
+      bridgePlaybackUrl: "",
     }))
   );
 
-  const [durMap, setDurMap] = useState({}); // key -> seconds
-  const totalMixSeconds = useMemo(() => {
-    return Object.values(durMap).reduce((a, b) => a + (Number(b) || 0), 0);
-  }, [durMap]);
+  // Master save UI state (kept)
+  const [msLoading, setMsLoading] = useState(false);
+  const [msErr, setMsErr] = useState("");
+  const [msOk, setMsOk] = useState(null); // { savedAt, snapshotKey }
 
-  const allLinesComplete = useMemo(() => {
-    return glueLines.every((l) => !!l.bridgeFileName);
-  }, [glueLines]);
+  /* ---------------- local project helpers ---------------- */
 
-  const handlePickBridge = (idx, file) => {
-    if (!file) return;
-    const url = URL.createObjectURL(file);
+  const projectStorageKey = (pid) => `project_${pid}`;
 
-    setGlueLines((prev) => {
-      const copy = [...prev];
-      safeRevoke(copy[idx].bridgeUrl);
-      copy[idx] = {
-        ...copy[idx],
-        bridgeFileName: file.name,
-        bridgeUrl: url,
+  function loadProjectLocal(pid) {
+    if (!pid) return null;
+    const raw = localStorage.getItem(projectStorageKey(pid));
+    const parsed = raw ? safeParse(raw) : null;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  }
+
+  function saveProjectLocal(pid, obj) {
+    if (!pid) return;
+    localStorage.setItem(projectStorageKey(pid), JSON.stringify(obj || {}));
+  }
+
+  function persistGlueLines(nextGlue) {
+    if (!projectId) return;
+
+    // 1) write to sb cache
+    try {
+      localStorage.setItem(storageKey("glueLines"), JSON.stringify(nextGlue));
+    } catch (e) {
+      // If this fails, we STILL try project blob below
+      console.warn("Failed writing sb glueLines:", e);
+    }
+
+    // 2) write to project blob (SOURCE OF TRUTH)
+    try {
+      const nowIso = new Date().toISOString();
+      const proj = loadProjectLocal(projectId) || { projectId, createdAt: nowIso };
+      const nextProj = {
+        ...proj,
+        projectId: proj.projectId || projectId,
+        updatedAt: nowIso,
+        nftMix: {
+          ...(proj.nftMix || {}),
+          glueLines: nextGlue,
+        },
       };
-      return copy;
-    });
+      saveProjectLocal(projectId, nextProj);
+    } catch (e) {
+      console.error("Failed writing project blob nftMix.glueLines:", e);
+    }
+  }
+
+  function hydrateGlueLines() {
+    if (!projectId) return;
+
+    // 1) project blob first (truth)
+    const proj = loadProjectLocal(projectId);
+    const fromProject = Array.isArray(proj?.nftMix?.glueLines) ? proj.nftMix.glueLines : null;
+    if (fromProject?.length) {
+      setGlueLines(sanitizeGlueLines(fromProject));
+      return;
+    }
+
+    // 2) fallback to sb cache
+    const saved = readJSON(storageKey("glueLines"), null);
+    if (Array.isArray(saved) && saved.length) {
+      setGlueLines(sanitizeGlueLines(saved));
+      return;
+    }
+
+    // 3) default seed
+    setGlueLines(
+      Array.from({ length: SONG_COUNT - 1 }).map((_, i) => ({
+        id: `glue-${i + 1}-to-${i + 2}`,
+        fromSlot: i + 1,
+        toSlot: i + 2,
+        locked: false,
+        bridgeFileName: "",
+        bridgeS3Key: "",
+        bridgePlaybackUrl: "",
+      }))
+    );
+  }
+
+  function sanitizeGlueLines(arr) {
+    // ensure shape + no weird undefineds
+    const safe = (Array.isArray(arr) ? arr : []).map((l) => ({
+      id: String(l?.id || `glue-${Number(l?.fromSlot) || 0}-to-${Number(l?.toSlot) || 0}`),
+      fromSlot: Number(l?.fromSlot) || 0,
+      toSlot: Number(l?.toSlot) || 0,
+      locked: !!l?.locked,
+      bridgeFileName: String(l?.bridgeFileName || ""),
+      bridgeS3Key: String(l?.bridgeS3Key || ""),
+      bridgePlaybackUrl: String(l?.bridgePlaybackUrl || ""),
+    }));
+
+    // If empty/invalid, keep a sane default
+    if (!safe.length) {
+      return Array.from({ length: SONG_COUNT - 1 }).map((_, i) => ({
+        id: `glue-${i + 1}-to-${i + 2}`,
+        fromSlot: i + 1,
+        toSlot: i + 2,
+        locked: false,
+        bridgeFileName: "",
+        bridgeS3Key: "",
+        bridgePlaybackUrl: "",
+      }));
+    }
+
+    return safe;
+  }
+
+  /* ---------------- hydrate glueLines on projectId ---------------- */
+
+  useEffect(() => {
+    if (!projectId) return;
+    hydrateGlueLines();
+
+    // also hydrate Master Save badge if present
+    const proj = loadProjectLocal(projectId);
+    const savedAt = safeString(proj?.nftMix?.masterSave?.savedAt);
+    const snapshotKey = safeString(proj?.nftMix?.masterSave?.snapshotKey);
+    if (savedAt || snapshotKey) setMsOk({ savedAt: savedAt || "", snapshotKey: snapshotKey || "" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
+  // Persist on change (locks INCLUDED)
+  useEffect(() => {
+    if (!projectId) return;
+    persistGlueLines(glueLines);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [glueLines, projectId]);
+
+  /* ---------------- Load snapshot (Album order + Catalog A audio) ---------------- */
+
+  useEffect(() => {
+    if (!projectId) return;
+    if (!API_BASE) {
+      setLoadErr("Missing VITE_BACKEND_URL in .env.local");
+      return;
+    }
+
+    let cancelled = false;
+
+    async function run() {
+      setLoading(true);
+      setLoadErr("");
+
+      try {
+        const r = await fetch(`${API_BASE}/api/master-save/latest/${projectId}`);
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j?.ok) throw new Error(j?.error || `HTTP ${r.status}`);
+        if (cancelled) return;
+
+        const project = j?.snapshot?.project || j?.snapshot?.snapshot?.project || j?.snapshot?.project || {};
+        const catalogSongs = Array.isArray(project?.catalog?.songs) ? project.catalog.songs : [];
+        const albumSongTitles = Array.isArray(project?.album?.songTitles) ? project.album.songTitles : [];
+        const playlistOrder = Array.isArray(project?.album?.playlistOrder) ? project.album.playlistOrder : null;
+
+        const orderedSlots =
+          Array.isArray(playlistOrder) && playlistOrder.length
+            ? playlistOrder
+                .map((id) => {
+                  const m = String(id).match(/^slot-(\d+)$/);
+                  return m ? Number(m[1]) : null;
+                })
+                .filter((n) => Number.isFinite(n) && n >= 1 && n <= SONG_COUNT)
+            : Array.from({ length: SONG_COUNT }).map((_, i) => i + 1);
+
+        const baseSongs = orderedSlots.map((slot) => {
+          const aTitle = albumSongTitles.find((x) => Number(x.slot) === slot);
+          const cSong =
+            catalogSongs.find((x) => Number(x.songNumber) === slot) ||
+            catalogSongs.find((x) => Number(x.slot) === slot);
+
+          const title = String(aTitle?.title || cSong?.title || "").trim() || `Song ${slot}`;
+
+          // supports BOTH shapes:
+          // - cSong.versions.A.s3Key
+          // - cSong.files.a.s3Key
+          const aS3Key =
+            String(cSong?.versions?.A?.s3Key || "").trim() ||
+            String(cSong?.files?.a?.s3Key || "").trim() ||
+            String(cSong?.files?.A?.s3Key || "").trim() ||
+            "";
+
+          return { slot, title, aS3Key, aUrl: "" };
+        });
+
+        const withUrls = await Promise.all(
+          baseSongs.map(async (s) => {
+            if (!s.aS3Key) return s;
+            const url = await fetchPlaybackUrl(API_BASE, s.aS3Key);
+            return { ...s, aUrl: url || "" };
+          })
+        );
+
+        if (cancelled) return;
+        setSongs(withUrls);
+
+        // Rebuild glue lines to match album order, preserving saved bridges/locks by pair
+        setGlueLines((prev) => {
+          const prevMap = new Map(prev.map((p) => [`${p.fromSlot}->${p.toSlot}`, p]));
+          const next = [];
+
+          for (let i = 0; i < orderedSlots.length - 1; i++) {
+            const fromSlot = orderedSlots[i];
+            const toSlot = orderedSlots[i + 1];
+            const key = `${fromSlot}->${toSlot}`;
+            const id = `glue-${fromSlot}-to-${toSlot}`;
+
+            const existing = prevMap.get(key);
+            if (existing) {
+              next.push({
+                ...existing,
+                id,
+                fromSlot,
+                toSlot,
+              });
+            } else {
+              next.push({
+                id,
+                fromSlot,
+                toSlot,
+                locked: false,
+                bridgeFileName: "",
+                bridgeS3Key: "",
+                bridgePlaybackUrl: "",
+              });
+            }
+          }
+          return next;
+        });
+      } catch (e) {
+        if (!cancelled) setLoadErr(e?.message || String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [API_BASE, projectId]);
+
+  /* ---------------- song helpers ---------------- */
+
+  const titleForSlot = (slot) => songs.find((x) => Number(x.slot) === Number(slot))?.title || `Song ${slot}`;
+  const songAUrlForSlot = (slot) => songs.find((x) => Number(x.slot) === Number(slot))?.aUrl || "";
+
+  /* ---------------- Bridge upload (S3) + lock ---------------- */
+
+  const handlePickBridge = async (idx, file) => {
+    if (!file) return;
+    if (!projectId) return;
+    if (!API_BASE) return window.alert("Missing VITE_BACKEND_URL in .env.local");
+    if (glueLines[idx]?.locked) return;
+
+    try {
+      setLoadErr("");
+
+      // Convert to dataURL for backend upload
+      const dataUrl = await fileToDataUrl(file);
+
+      // Upload to S3 via backend
+      const up = await fetch(`${API_BASE}/api/upload-misc`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId,
+          fileName: file.name,
+          base64: dataUrl,
+          mimeType: file.type || "audio/mpeg",
+        }),
+      });
+
+      const uj = await up.json().catch(() => ({}));
+      if (!up.ok || !uj?.ok) throw new Error(uj?.error || `Upload failed HTTP ${up.status}`);
+
+      const s3Key = String(uj.s3Key || "").trim();
+      if (!s3Key) throw new Error("Upload succeeded but missing s3Key");
+
+      // Get playback URL (presigned)
+      const playbackUrl = await fetchPlaybackUrl(API_BASE, s3Key);
+
+      setGlueLines((prev) => {
+        const copy = [...prev];
+        copy[idx] = {
+          ...copy[idx],
+          bridgeFileName: file.name,
+          bridgeS3Key: s3Key,
+          bridgePlaybackUrl: playbackUrl || "",
+        };
+        return copy;
+      });
+    } catch (e) {
+      window.alert(`Bridge upload failed:\n\n${e?.message || String(e)}`);
+    }
   };
 
   const toggleLock = (idx) => {
@@ -73,30 +341,468 @@ export default function NFTMix() {
     });
   };
 
-  const handleMasterSave = () => {
-    if (!allLinesComplete) {
-      window.alert(
-        "Master Save refused.\n\nPlease upload ALL bridge files before continuing."
-      );
+  /* ---------------- Build ONE playable timeline (prefix until missing) ---------------- */
+
+  const segments = useMemo(() => {
+    const out = [];
+    if (!songs.length) return out;
+
+    const orderedSlots = songs.map((s) => Number(s.slot)).filter((n) => Number.isFinite(n));
+    if (!orderedSlots.length) return out;
+
+    const firstSlot = orderedSlots[0];
+    const firstUrl = songAUrlForSlot(firstSlot);
+    if (!firstUrl) return out;
+
+    out.push({
+      key: `song-${firstSlot}`,
+      type: "song",
+      fromSlot: firstSlot,
+      toSlot: null,
+      label: `Song ${firstSlot} — ${titleForSlot(firstSlot)}`,
+      url: firstUrl,
+    });
+
+    for (let i = 0; i < orderedSlots.length - 1; i++) {
+      const fromSlot = orderedSlots[i];
+      const toSlot = orderedSlots[i + 1];
+
+      const bridge = glueLines.find((l) => Number(l.fromSlot) === fromSlot && Number(l.toSlot) === toSlot);
+      const bridgeUrl = String(bridge?.bridgePlaybackUrl || "").trim();
+      const nextSongUrl = songAUrlForSlot(toSlot);
+
+      if (!bridgeUrl || !nextSongUrl) break;
+
+      out.push({
+        key: `bridge-${fromSlot}-${toSlot}`,
+        type: "bridge",
+        fromSlot,
+        toSlot,
+        label: `Bridge ${fromSlot}→${toSlot}`,
+        url: bridgeUrl,
+      });
+
+      out.push({
+        key: `song-${toSlot}`,
+        type: "song",
+        fromSlot: toSlot,
+        toSlot: null,
+        label: `Song ${toSlot} — ${titleForSlot(toSlot)}`,
+        url: nextSongUrl,
+      });
+    }
+
+    return out;
+  }, [songs, glueLines]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const playableLabel = useMemo(() => {
+    if (!segments.length) return "Nothing playable yet (need Song 1 A).";
+    const last = segments[segments.length - 1];
+    return `Playable now: ${segments[0]?.label || ""} → … → ${last?.label || ""}`;
+  }, [segments]);
+
+  /* ---------------- Global player engine (single <audio>) ---------------- */
+
+  const audioRef = useRef(null);
+  const rafRef = useRef(null);
+
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [segIdx, setSegIdx] = useState(0);
+  const [segT, setSegT] = useState(0);
+  const [durByKey, setDurByKey] = useState({});
+
+  const activeSeg = segments[segIdx] || null;
+
+  const stopRaf = () => {
+    try {
+      cancelAnimationFrame(rafRef.current);
+    } catch {}
+  };
+
+  const tick = () => {
+    const el = audioRef.current;
+    if (!el) return;
+    setSegT(el.currentTime || 0);
+    rafRef.current = requestAnimationFrame(tick);
+  };
+
+  // Preload durations so scrub mapping is accurate
+  useEffect(() => {
+    let cancelled = false;
+
+    async function preloadDurations() {
+      for (const s of segments) {
+        if (cancelled) return;
+        if (durByKey[s.key]) continue;
+        if (!s.url) continue;
+
+        const d = await probeDuration(s.url);
+        if (cancelled) return;
+        if (d) {
+          setDurByKey((prev) => ({ ...prev, [s.key]: d }));
+        }
+      }
+    }
+
+    preloadDurations();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [segments.map((x) => x.key).join("|")]);
+
+  const totalPlayableSeconds = useMemo(() => {
+    return segments.reduce((sum, s) => sum + (Number(durByKey[s.key]) || 0), 0);
+  }, [segments, durByKey]);
+
+  const globalTime = useMemo(() => {
+    let t = 0;
+    for (let i = 0; i < segments.length; i++) {
+      const s = segments[i];
+      const d = Number(durByKey[s.key]) || 0;
+      if (i < segIdx) t += d;
+      else if (i === segIdx) t += Math.min(d || 0, Number(segT) || 0);
+    }
+    return t;
+  }, [segments, durByKey, segIdx, segT]);
+
+  const loadSegment = (idx, { autoplay = false, seekSeconds = 0 } = {}) => {
+    const el = audioRef.current;
+    if (!el) return;
+
+    const s = segments[idx];
+    if (!s?.url) return;
+
+    stopRaf();
+    el.pause();
+
+    el.src = s.url;
+    el.load();
+
+    setSegIdx(idx);
+    setSegT(0);
+
+    el.onloadedmetadata = () => {
+      const d = Number(el.duration) || 0;
+      setDurByKey((prev) => ({ ...prev, [s.key]: d }));
+
+      const safeSeek = Math.max(0, Math.min(d || 0, Number(seekSeconds) || 0));
+      if (safeSeek) {
+        try {
+          el.currentTime = safeSeek;
+          setSegT(el.currentTime || 0);
+        } catch {}
+      }
+
+      if (autoplay) {
+        el.play()
+          .then(() => {
+            setIsPlaying(true);
+            stopRaf();
+            rafRef.current = requestAnimationFrame(tick);
+          })
+          .catch(() => setIsPlaying(false));
+      }
+    };
+
+    el.onended = () => {
+      if (idx < segments.length - 1) {
+        loadSegment(idx + 1, { autoplay: true, seekSeconds: 0 });
+      } else {
+        setIsPlaying(false);
+        stopRaf();
+      }
+    };
+  };
+
+  const togglePlay = async () => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (!segments.length) return;
+
+    if (!el.getAttribute("src")) {
+      loadSegment(0, { autoplay: true, seekSeconds: 0 });
       return;
     }
 
+    if (isPlaying) {
+      el.pause();
+      setIsPlaying(false);
+      stopRaf();
+      return;
+    }
+
+    try {
+      await el.play();
+      setIsPlaying(true);
+      stopRaf();
+      rafRef.current = requestAnimationFrame(tick);
+    } catch {
+      setIsPlaying(false);
+    }
+  };
+
+  const reset = () => {
+    const el = audioRef.current;
+    if (!el) return;
+    el.pause();
+    try {
+      el.currentTime = 0;
+    } catch {}
+    setIsPlaying(false);
+    stopRaf();
+    setSegT(0);
+  };
+
+  /* ---------------- Scrub: click + DRAG ---------------- */
+
+  const dragRef = useRef({ dragging: false });
+
+  const seekGlobalSeconds = (targetSeconds) => {
+    if (!segments.length) return;
+    if (!totalPlayableSeconds) return;
+
+    const target = Math.max(0, Math.min(totalPlayableSeconds, Number(targetSeconds) || 0));
+
+    let acc = 0;
+    for (let i = 0; i < segments.length; i++) {
+      const s = segments[i];
+      const d = Number(durByKey[s.key]) || 0;
+      if (!d) break;
+
+      if (target <= acc + d) {
+        const offset = target - acc;
+        const el = audioRef.current;
+
+        if (i === segIdx && el && el.getAttribute("src")) {
+          try {
+            el.currentTime = Math.max(0, Math.min(d, offset));
+            setSegT(el.currentTime || 0);
+          } catch {}
+          return;
+        }
+
+        loadSegment(i, { autoplay: isPlaying, seekSeconds: offset });
+        return;
+      }
+      acc += d;
+    }
+  };
+
+  const pointerToGlobalSeconds = (e, rect) => {
+    const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+    const pct = rect.width ? x / rect.width : 0;
+    return totalPlayableSeconds * pct;
+  };
+
+  const onScrubPointerDown = (e) => {
+    if (!totalPlayableSeconds) return;
+    const el = e.currentTarget;
+    const rect = el.getBoundingClientRect();
+
+    dragRef.current.dragging = true;
+    try {
+      el.setPointerCapture?.(e.pointerId);
+    } catch {}
+
+    const target = pointerToGlobalSeconds(e, rect);
+    seekGlobalSeconds(target);
+  };
+
+  const onScrubPointerMove = (e) => {
+    if (!dragRef.current.dragging) return;
+    if (!totalPlayableSeconds) return;
+
+    const el = e.currentTarget;
+    const rect = el.getBoundingClientRect();
+
+    const target = pointerToGlobalSeconds(e, rect);
+    seekGlobalSeconds(target);
+  };
+
+  const onScrubPointerUp = (e) => {
+    const el = e.currentTarget;
+    dragRef.current.dragging = false;
+    try {
+      el.releasePointerCapture?.(e.pointerId);
+    } catch {}
+  };
+
+  /* ---------------- Bridge row Play/Pause ---------------- */
+
+  const isActiveBridge = (fromSlot, toSlot) => {
+    return (
+      activeSeg &&
+      activeSeg.type === "bridge" &&
+      Number(activeSeg.fromSlot) === Number(fromSlot) &&
+      Number(activeSeg.toSlot) === Number(toSlot)
+    );
+  };
+
+  const toggleBridgeRow = (fromSlot, toSlot, bridgeUrl) => {
+    if (!bridgeUrl) return;
+
+    if (isActiveBridge(fromSlot, toSlot) && isPlaying) {
+      const el = audioRef.current;
+      if (!el) return;
+      el.pause();
+      setIsPlaying(false);
+      stopRaf();
+      return;
+    }
+
+    if (isActiveBridge(fromSlot, toSlot) && !isPlaying) {
+      const el = audioRef.current;
+      if (!el) return;
+      el.play()
+        .then(() => {
+          setIsPlaying(true);
+          stopRaf();
+          rafRef.current = requestAnimationFrame(tick);
+        })
+        .catch(() => setIsPlaying(false));
+      return;
+    }
+
+    const idxSeg = segments.findIndex(
+      (s) => s.type === "bridge" && Number(s.fromSlot) === Number(fromSlot) && Number(s.toSlot) === Number(toSlot)
+    );
+
+    if (idxSeg >= 0) {
+      loadSegment(idxSeg, { autoplay: true, seekSeconds: 0 });
+      return;
+    }
+
+    // fallback preview only
+    const el = audioRef.current;
+    if (!el) return;
+    stopRaf();
+    el.pause();
+    el.src = bridgeUrl;
+    el.load();
+    setSegIdx(0);
+    setSegT(0);
+
+    el.onloadedmetadata = () => {
+      el.play()
+        .then(() => {
+          setIsPlaying(true);
+          stopRaf();
+          rafRef.current = requestAnimationFrame(tick);
+        })
+        .catch(() => setIsPlaying(false));
+    };
+
+    el.onended = () => {
+      setIsPlaying(false);
+      stopRaf();
+    };
+  };
+
+  /* ---------------- NFT MIX MASTER SAVE ---------------- */
+
+  const safeGlueLinesForSave = useMemo(() => {
+    return (glueLines || []).map((l) => ({
+      id: String(l.id || ""),
+      fromSlot: Number(l.fromSlot) || 0,
+      toSlot: Number(l.toSlot) || 0,
+      locked: !!l.locked,
+      bridgeFileName: String(l.bridgeFileName || ""),
+      bridgeS3Key: String(l.bridgeS3Key || ""),
+      bridgePlaybackUrl: String(l.bridgePlaybackUrl || ""),
+    }));
+  }, [glueLines]);
+
+  const handleMasterSave = async () => {
+    if (!projectId) return;
+    if (!API_BASE) return window.alert("Missing VITE_BACKEND_URL in .env.local");
+
+    setMsErr("");
+    setMsOk(null);
+
     const first = window.confirm(
-      "Are you sure you want to perform a Master Save from NFT Mix?\n\nThis will lock in your NFT mix glue lines."
+      "NFT Mix Master Save?\n\nThis will snapshot your current NFT Mix glue lines (bridges + locks)."
     );
     if (!first) return;
 
-    const second = window.confirm(
-      "Last chance.\n\nMake sure everything is complete before continuing."
-    );
+    const second = window.confirm("Last chance.\n\nContinue with NFT Mix Master Save?");
     if (!second) return;
 
-    window.alert("UI only: NFT Mix Master Save complete.");
+    setMsLoading(true);
+
+    try {
+      const nowIso = new Date().toISOString();
+      const proj = loadProjectLocal(projectId) || { projectId, createdAt: nowIso };
+
+      const nextProject = {
+        ...proj,
+        projectId: proj.projectId || projectId,
+        updatedAt: nowIso,
+        nftMix: {
+          ...(proj.nftMix || {}),
+          glueLines: safeGlueLinesForSave,
+          masterSave: {
+            ...(proj?.nftMix?.masterSave || {}),
+            savedAt: nowIso,
+          },
+        },
+        masterSave: {
+          ...(proj.masterSave || {}),
+          lastMasterSaveAt: nowIso,
+          sections: {
+            ...(proj?.masterSave?.sections || {}),
+            nftMix: {
+              complete: true,
+              masterSavedAt: nowIso,
+            },
+          },
+        },
+      };
+
+      saveProjectLocal(projectId, nextProject);
+
+      const r = await fetch(`${API_BASE}/api/master-save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, project: nextProject }),
+      });
+
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j?.ok) throw new Error(j?.error || `HTTP ${r.status}`);
+
+      const snapshotKey = safeString(j.snapshotKey || j.s3Key || "");
+      const savedAt = nowIso;
+
+      const finalProject = loadProjectLocal(projectId) || nextProject;
+      finalProject.nftMix = finalProject.nftMix || {};
+      finalProject.nftMix.masterSave = {
+        ...(finalProject.nftMix.masterSave || {}),
+        savedAt,
+        snapshotKey,
+      };
+      finalProject.masterSave = finalProject.masterSave || {};
+      finalProject.masterSave.sections = finalProject.masterSave.sections || {};
+      finalProject.masterSave.sections.nftMix = {
+        complete: true,
+        masterSavedAt: savedAt,
+        snapshotKey,
+      };
+      finalProject.updatedAt = savedAt;
+      saveProjectLocal(projectId, finalProject);
+
+      setMsOk({ savedAt, snapshotKey });
+    } catch (e) {
+      setMsErr(e?.message || String(e));
+    } finally {
+      setMsLoading(false);
+    }
   };
+
+  /* ---------------- UI ---------------- */
 
   return (
     <div style={{ maxWidth: 1200 }}>
-      {/* Small header (magic-link requirement) */}
+      {/* Small header */}
       <div style={{ fontSize: 11, opacity: 0.75, marginBottom: 12 }}>
         Project ID: <code>{projectId}</code>
         {token ? (
@@ -107,103 +813,115 @@ export default function NFTMix() {
         ) : null}
       </div>
 
-      {/* Title */}
+      {/* Title + right stats */}
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
         <div>
-          <div style={{ fontSize: 24, fontWeight: 900, color: "#0f172a" }}>
-            NFT Mix
-          </div>
+          <div style={{ fontSize: 24, fontWeight: 900, color: "#0f172a" }}>NFT Mix</div>
+
           <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
-            Glue format (giveaway MP3): <strong>A + Bridge + A</strong>{" "}
-            continuous. Source defaults to <strong>Version A</strong>.
+            Giveaway MP3: <strong>Song A + Bridge + Song A</strong> continuous (Album order). Source defaults to{" "}
+            <strong>Version A</strong>.
           </div>
+
+          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75, lineHeight: 1.5 }}>
+            Bridges are now saved to <strong>S3</strong>, and lock state is saved in your <code>project_{projectId}</code>{" "}
+            blob — so it will survive refresh reliably.
+          </div>
+
+          {loading ? <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>Loading Album → NFT Mix…</div> : null}
+          {loadErr ? (
+            <div style={{ marginTop: 8, ...errorBox() }}>
+              {loadErr}
+            </div>
+          ) : null}
         </div>
 
-        <div
-          style={{
-            display: "flex",
-            gap: 16,
-            fontSize: 12,
-            opacity: 0.75,
-            alignItems: "flex-end",
-          }}
-        >
+        <div style={{ display: "flex", gap: 16, fontSize: 12, opacity: 0.75, alignItems: "flex-end" }}>
           <div>
-            # of Songs: <strong>{songs.length}</strong>
+            # of Songs: <strong>{songs.length || SONG_COUNT}</strong>
           </div>
           <div>
-            Mix Time: <strong>{fmtTime(totalMixSeconds)}</strong>
+            Playable Time: <strong>{fmtTime(totalPlayableSeconds)}</strong>
           </div>
         </div>
       </div>
 
-      {/* Cover (optional) */}
+      {/* Global player */}
       <div style={{ marginTop: 14, ...card() }}>
-        <div style={sectionTitle()}>Album Cover (from Catalog)</div>
+        <div style={sectionTitle()}>NFT Mix Player</div>
 
-        <div
-          style={{
-            marginTop: 10,
-            display: "flex",
-            gap: 14,
-            alignItems: "center",
-          }}
-        >
+        <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
+          {playableLabel}
+          {activeSeg ? (
+            <>
+              <span style={{ opacity: 0.6 }}> · </span>
+              <span style={{ fontWeight: 900 }}>Now Playing:</span> {activeSeg.label}
+            </>
+          ) : null}
+        </div>
+
+        <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 12 }}>
+          <button type="button" onClick={togglePlay} style={primaryBtn(!segments.length)}>
+            {isPlaying ? "Pause" : "Play"}
+          </button>
+
+          <div style={{ fontSize: 12, opacity: 0.7, minWidth: 130 }}>
+            {fmtTime(globalTime)} / {fmtTime(totalPlayableSeconds)}
+          </div>
+
           <div
+            onPointerDown={onScrubPointerDown}
+            onPointerMove={onScrubPointerMove}
+            onPointerUp={onScrubPointerUp}
+            onPointerCancel={onScrubPointerUp}
+            title={!totalPlayableSeconds ? "Waiting for durations…" : "Drag to scrub the playable mix"}
             style={{
-              width: 120,
-              height: 120,
-              borderRadius: 14,
+              flex: 1,
+              height: 26,
+              borderRadius: 999,
               border: "1px solid #e5e7eb",
-              background: "#f8fafc",
+              background: "#f3f4f6",
               overflow: "hidden",
-              flex: "0 0 auto",
+              cursor: totalPlayableSeconds ? "grab" : "not-allowed",
+              opacity: segments.length ? 1 : 0.6,
+              display: "flex",
+              alignItems: "center",
+              padding: "0 6px",
+              touchAction: "none",
+              userSelect: "none",
             }}
           >
-            {catalogMeta.coverUrl ? (
-              <img
-                src={catalogMeta.coverUrl}
-                alt="Cover"
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  objectFit: "cover",
-                  display: "block",
-                }}
-              />
-            ) : null}
+            <div
+              style={{
+                width: totalPlayableSeconds ? `${Math.round((globalTime / totalPlayableSeconds) * 100)}%` : "0%",
+                height: 14,
+                borderRadius: 999,
+                background: "#111827",
+                opacity: 0.35,
+              }}
+            />
           </div>
 
-          <div style={{ fontSize: 12, opacity: 0.8 }}>
-            Project:{" "}
-            <strong>{catalogMeta.albumTitle || "[ Album Title ]"}</strong>
-            <div style={{ marginTop: 6, fontSize: 11, opacity: 0.7 }}>
-              (UI only: cover comes from Catalog JSON later)
-            </div>
-          </div>
+          <button type="button" onClick={reset} style={resetBtn()}>
+            Reset
+          </button>
         </div>
+
+        <audio ref={audioRef} />
       </div>
 
       {/* Glue lines */}
       <div style={{ marginTop: 14, ...card() }}>
         <div style={sectionTitle()}>Glue / Bridge Lines</div>
         <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
-          Each row is <strong>FROM</strong> + <strong>BRIDGE</strong> +{" "}
-          <strong>TO</strong>. (Removed song-title + ver text per your request.)
+          Lock now persists across refresh. Upload is disabled when locked.
         </div>
 
-        <div
-          style={{
-            marginTop: 12,
-            border: "1px solid #e5e7eb",
-            borderRadius: 14,
-            overflow: "hidden",
-          }}
-        >
+        <div style={{ marginTop: 12, border: "1px solid #e5e7eb", borderRadius: 14, overflow: "hidden" }}>
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "1.2fr 2.2fr 1.2fr",
+              gridTemplateColumns: "1.2fr 2.6fr 1.2fr",
               padding: "10px 12px",
               background: "#f8fafc",
               borderBottom: "1px solid #e5e7eb",
@@ -217,227 +935,116 @@ export default function NFTMix() {
             }}
           >
             <div>From</div>
-            <div>Bridge</div>
-            <div>To</div>
+            <div style={{ textAlign: "center" }}>Bridge</div>
+            <div style={{ textAlign: "right" }}>To</div>
           </div>
 
-          {glueLines.map((line, idx) => (
-            <div
-              key={line.id}
-              style={{
-                padding: "12px 12px",
-                borderBottom:
-                  idx === glueLines.length - 1 ? "none" : "1px solid #e5e7eb",
-                background: line.locked ? "#fee2e2" : "#fff",
-              }}
-            >
-              {/* SELECT ROW (clean) */}
+          {glueLines.map((line, idx) => {
+            const bridgeUrl = String(line.bridgePlaybackUrl || "").trim();
+            const bridgePlayable = !!bridgeUrl;
+            const bridgeActive = isActiveBridge(line.fromSlot, line.toSlot);
+            const showPause = bridgeActive && isPlaying;
+
+            return (
               <div
+                key={line.id}
                 style={{
-                  display: "grid",
-                  gridTemplateColumns: "1.2fr 2.2fr 1.2fr",
-                  gap: 10,
-                  alignItems: "center",
+                  padding: "12px 12px",
+                  borderBottom: idx === glueLines.length - 1 ? "none" : "1px solid #e5e7eb",
+                  background: bridgeActive ? "rgba(17,24,39,0.04)" : "#fff",
                 }}
               >
-                {/* FROM (no song title / no ver text) */}
-                <div style={{ fontSize: 13, fontWeight: 900, color: "#0f172a" }}>
-                  Song {line.from}
-                </div>
-
-                {/* BRIDGE upload + filename */}
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: 10,
-                    alignItems: "center",
-                  }}
-                >
-                  <label
-                    style={{
-                      display: "inline-block",
-                      padding: "8px 12px",
-                      borderRadius: 10,
-                      background: line.locked ? "#e5e7eb" : "#22c55e",
-                      color: line.locked ? "#6b7280" : "#064e3b",
-                      fontSize: 12,
-                      fontWeight: 900,
-                      cursor: line.locked ? "not-allowed" : "pointer",
-                      border: "1px solid #16a34a",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    Upload Bridge
-                    <input
-                      type="file"
-                      accept="audio/*"
-                      disabled={line.locked}
-                      style={{ display: "none" }}
-                      onChange={(e) =>
-                        handlePickBridge(idx, e.target.files?.[0] || null)
-                      }
-                    />
-                  </label>
-
-                  <div
-                    style={{
-                      fontSize: 12,
-                      opacity: 0.75,
-                      textAlign: "right",
-                      flex: 1,
-                    }}
-                  >
-                    {line.bridgeFileName ? (
-                      <code style={{ wordBreak: "break-word" }}>
-                        {line.bridgeFileName}
-                      </code>
-                    ) : (
-                      "—"
-                    )}
+                <div style={{ display: "grid", gridTemplateColumns: "1.2fr 2.6fr 1.2fr", gap: 10, alignItems: "center" }}>
+                  <div style={{ fontSize: 14, fontWeight: 900, color: "#0f172a", minWidth: 0 }}>
+                    Song {line.fromSlot} — {titleForSlot(line.fromSlot)}
                   </div>
-                </div>
 
-                {/* TO (no song title / no ver text) */}
-                <div style={{ fontSize: 13, fontWeight: 900, color: "#0f172a" }}>
-                  Song {line.to}
-                </div>
-              </div>
+                  <div style={{ display: "flex", justifyContent: "center" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div style={plusPill()}>+</div>
 
-              {/* PLAYERS */}
-              <div
-                style={{
-                  marginTop: 12,
-                  display: "grid",
-                  gridTemplateColumns: "1fr 1fr 120px",
-                  gap: 12,
-                  alignItems: "start",
-                }}
-              >
-                <div>
-                  <div
-                    style={{
-                      fontSize: 11,
-                      fontWeight: 900,
-                      opacity: 0.65,
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    Bridge Preview
-                  </div>
-                  <div style={{ marginTop: 6 }}>
-                    <MiniPlayer
-                      label={`Bridge ${line.from}→${line.to}`}
-                      url={line.bridgeUrl}
-                      disabled={!line.bridgeUrl}
-                      onDuration={(sec) =>
-                        setDurMap((prev) => ({
-                          ...prev,
-                          [`bridge-${line.id}`]: sec,
-                        }))
-                      }
-                    />
-                  </div>
-                </div>
+                      <label style={uploadBtn(line.locked)}>
+                        Upload Bridge
+                        <input
+                          type="file"
+                          accept="audio/*"
+                          disabled={line.locked}
+                          style={{ display: "none" }}
+                          onChange={(e) => {
+                            handlePickBridge(idx, e.target.files?.[0] || null);
+                            e.target.value = "";
+                          }}
+                        />
+                      </label>
 
-                <div>
-                  <div
-                    style={{
-                      fontSize: 11,
-                      fontWeight: 900,
-                      opacity: 0.65,
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    A + Bridge + A Preview
-                  </div>
-                  <div style={{ marginTop: 6 }}>
-                    <MiniPlayer
-                      label={`A+B+C ${line.from}→${line.to}`}
-                      url={line.abcPreviewUrl}
-                      disabled={!line.abcPreviewUrl}
-                      onDuration={(sec) =>
-                        setDurMap((prev) => ({
-                          ...prev,
-                          [`abc-${line.id}`]: sec,
-                        }))
-                      }
-                    />
-                    <div style={{ marginTop: 6, fontSize: 11, opacity: 0.65 }}>
-                      (UI only: preview output wired via Export/Tools later)
+                      <div style={{ fontSize: 12, opacity: 0.75, minWidth: 220 }}>
+                        {line.bridgeFileName ? <code style={{ wordBreak: "break-word" }}>{line.bridgeFileName}</code> : "—"}
+                      </div>
+
+                      <button
+                        type="button"
+                        title={bridgePlayable ? "Play/Pause bridge (global player)" : "Upload bridge first"}
+                        onClick={() => toggleBridgeRow(line.fromSlot, line.toSlot, bridgeUrl)}
+                        style={tinyPlayBtn(bridgePlayable)}
+                      >
+                        {showPause ? "⏸" : "▶"}
+                      </button>
+
+                      <div style={plusPill()}>+</div>
                     </div>
                   </div>
+
+                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, alignItems: "center" }}>
+                    <div style={{ fontSize: 14, fontWeight: 900, color: "#0f172a", textAlign: "right", minWidth: 0 }}>
+                      Song {line.toSlot} — {titleForSlot(line.toSlot)}
+                    </div>
+
+                    <button type="button" onClick={() => toggleLock(idx)} style={lockBtn(line.locked)}>
+                      {line.locked ? "Locked" : "Unlock"}
+                    </button>
+                  </div>
                 </div>
 
-                <div style={{ textAlign: "right" }}>
-                  <button
-                    type="button"
-                    onClick={() => toggleLock(idx)}
-                    style={lockBtn(line.locked)}
-                  >
-                    {line.locked ? "Locked" : "Unlock"}
-                  </button>
-                </div>
+                {line.locked ? (
+                  <div style={{ marginTop: 8, fontSize: 11, opacity: 0.7 }}>
+                    ✅ Locked: bridge upload disabled and will persist across refresh.
+                  </div>
+                ) : null}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
-      {/* Full Mix Preview */}
+      {/* NFT MASTER SAVE */}
       <div style={{ marginTop: 14, ...card() }}>
-        <div style={sectionTitle()}>Full Mix Preview</div>
-        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
-          NFT Mix MP3 Preview (shows full time of mix).
-        </div>
+        <div style={sectionTitle()}>Master Save</div>
 
-        <div style={{ marginTop: 10 }}>
-          <MiniPlayer
-            label="NFT Mix MP3"
-            url={""}
-            disabled={true}
-            onDuration={(sec) => setDurMap((p) => ({ ...p, fullMix: sec }))}
-          />
-          <div style={{ marginTop: 6, fontSize: 11, opacity: 0.65 }}>
-            (UI only: full mix output comes from converter later)
-          </div>
-        </div>
-      </div>
-
-      {/* Export hook */}
-      <div style={{ marginTop: 14, ...card() }}>
-        <div style={sectionTitle()}>Export / Converter Hook</div>
-
-        <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button type="button" style={ghostBtn()}>
-            Generate NFT Mix JSON
-          </button>
-          <button type="button" style={ghostBtn()}>
-            Copy JSON
-          </button>
-          <button type="button" style={ghostBtn()}>
-            Push to S3
-          </button>
-        </div>
-
-        <div style={{ marginTop: 10, fontSize: 11, opacity: 0.65 }}>
-          Note: Glue player output connects to <strong>Export/Tools</strong>{" "}
-          converter.
-        </div>
-      </div>
-
-      {/* Master Save */}
-      <div style={{ marginTop: 14, ...card() }}>
-        <div style={{ fontSize: 12, opacity: 0.75, lineHeight: 1.6 }}>
-          <strong>Master Save</strong> is the second layer of saving. Two
-          confirmations required.
+        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75, lineHeight: 1.6 }}>
+          Master Save snapshots your NFT Mix glue lines (bridges + locks) into S3 via the backend.
           <br />
-          Rule (now): requires all glue lines have a bridge file uploaded.
+          Two confirmations required.
         </div>
+
+        {msErr ? <div style={{ marginTop: 10, ...errorBox() }}>{msErr}</div> : null}
+
+        {msOk ? (
+          <div style={{ marginTop: 10, ...okBox() }}>
+            <div>
+              <strong>NFT Mix Master Saved.</strong>
+            </div>
+            <div style={{ marginTop: 4, fontSize: 12 }}>
+              Saved At: <code>{msOk.savedAt || ""}</code>
+            </div>
+            <div style={{ marginTop: 4, fontSize: 12 }}>
+              Snapshot Key: <code>{msOk.snapshotKey || "—"}</code>
+            </div>
+          </div>
+        ) : null}
 
         <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
-          <button type="button" style={primaryBtn()} onClick={handleMasterSave}>
-            Master Save
+          <button type="button" onClick={handleMasterSave} disabled={msLoading} style={primaryBtn(msLoading)}>
+            {msLoading ? "Master Saving…" : "Master Save"}
           </button>
         </div>
       </div>
@@ -445,142 +1052,73 @@ export default function NFTMix() {
   );
 }
 
-/* ---------------- mini custom player (no 3-dot menu) ---------------- */
+/* ---------------- API ---------------- */
 
-function MiniPlayer({ label, url, disabled, onDuration }) {
-  const audioRef = useRef(null);
-  const rafRef = useRef(null);
-
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [t, setT] = useState(0);
-  const [dur, setDur] = useState(0);
-
-  const tick = () => {
-    const el = audioRef.current;
-    if (!el) return;
-    setT(el.currentTime || 0);
-    rafRef.current = requestAnimationFrame(tick);
-  };
-
-  const onLoaded = () => {
-    const el = audioRef.current;
-    if (!el) return;
-    const d = el.duration || 0;
-    setDur(d);
-    onDuration?.(d);
-  };
-
-  const onEnded = () => {
-    setIsPlaying(false);
-    cancelAnimationFrame(rafRef.current);
-  };
-
-  const toggle = async () => {
-    if (disabled) return;
-    const el = audioRef.current;
-    if (!el) return;
-
-    if (isPlaying) {
-      el.pause();
-      setIsPlaying(false);
-      cancelAnimationFrame(rafRef.current);
-      return;
-    }
-
-    try {
-      await el.play();
-      setIsPlaying(true);
-      rafRef.current = requestAnimationFrame(tick);
-    } catch {
-      setIsPlaying(false);
-    }
-  };
-
-  const scrub = (e) => {
-    const el = audioRef.current;
-    if (!el || !dur) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
-    const nextPct = rect.width ? x / rect.width : 0;
-    el.currentTime = dur * nextPct;
-    setT(el.currentTime);
-  };
-
-  const reset = () => {
-    const el = audioRef.current;
-    if (!el) return;
-    el.pause();
-    el.currentTime = 0;
-    setT(0);
-    setIsPlaying(false);
-    cancelAnimationFrame(rafRef.current);
-  };
-
-  const pct = dur ? Math.min(1, t / dur) : 0;
-
-  return (
-    <div
-      style={{
-        border: "1px solid #e5e7eb",
-        borderRadius: 12,
-        padding: 12,
-        background: "#fff",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          gap: 10,
-          alignItems: "baseline",
-        }}
-      >
-        <div style={{ fontSize: 12, fontWeight: 900 }}>{label}</div>
-        <div style={{ fontSize: 11, opacity: 0.7 }}>
-          {fmtTime(t)} / {fmtTime(dur)}
-        </div>
-      </div>
-
-      <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10 }}>
-        <button type="button" onClick={toggle} style={playBtn(!disabled)}>
-          {isPlaying ? "Pause" : "Play"}
-        </button>
-
-        <div
-          onClick={scrub}
-          title={disabled ? "Missing audio" : "Click to scrub"}
-          style={{
-            flex: 1,
-            height: 12,
-            borderRadius: 999,
-            border: "1px solid #e5e7eb",
-            background: "#f3f4f6",
-            overflow: "hidden",
-            cursor: disabled ? "not-allowed" : "pointer",
-            opacity: disabled ? 0.5 : 1,
-          }}
-        >
-          <div
-            style={{
-              width: `${Math.round(pct * 100)}%`,
-              height: "100%",
-              background: "#111827",
-              opacity: 0.35,
-            }}
-          />
-        </div>
-
-        <button type="button" onClick={reset} style={resetBtn()}>
-          Reset
-        </button>
-      </div>
-
-      <audio ref={audioRef} src={url || ""} onLoadedMetadata={onLoaded} onEnded={onEnded} />
-    </div>
-  );
+async function fetchPlaybackUrl(API_BASE, s3Key) {
+  const qs = new URLSearchParams({ s3Key });
+  const r = await fetch(`${API_BASE}/api/playback-url?${qs.toString()}`);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j?.ok) return "";
+  return String(j.url || "");
 }
 
-/* ---------------- helpers/styles ---------------- */
+/* ---------------- duration probe ---------------- */
+
+function probeDuration(url) {
+  return new Promise((resolve) => {
+    try {
+      const a = new Audio();
+      a.preload = "metadata";
+      a.src = url;
+      const done = (v) => {
+        a.onloadedmetadata = null;
+        a.onerror = null;
+        resolve(Number(v) || 0);
+      };
+      a.onloadedmetadata = () => done(a.duration || 0);
+      a.onerror = () => done(0);
+    } catch {
+      resolve(0);
+    }
+  });
+}
+
+/* ---------------- small helpers ---------------- */
+
+function safeParse(json) {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+function safeString(v) {
+  return String(v ?? "").trim();
+}
+
+function readJSON(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    try {
+      const r = new FileReader();
+      r.onerror = () => reject(new Error("FileReader failed"));
+      r.onload = () => resolve(String(r.result || ""));
+      r.readAsDataURL(file);
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
 
 function fmtTime(s) {
   if (!s || !isFinite(s)) return "0:00";
@@ -589,47 +1127,69 @@ function fmtTime(s) {
   return `${m}:${String(r).padStart(2, "0")}`;
 }
 
-function safeRevoke(url) {
-  if (!url) return;
-  if (typeof url === "string" && url.startsWith("blob:")) {
-    try {
-      URL.revokeObjectURL(url);
-    } catch {}
-  }
-}
+/* ---------------- styles ---------------- */
 
 function card() {
-  return {
-    background: "#ffffff",
-    border: "1px solid #e5e7eb",
-    borderRadius: 12,
-    padding: 16,
-  };
+  return { background: "#ffffff", border: "1px solid #e5e7eb", borderRadius: 12, padding: 16 };
 }
 
 function sectionTitle() {
-  return {
-    fontSize: 12,
-    fontWeight: 900,
-    letterSpacing: 0.2,
-    textTransform: "uppercase",
-  };
+  return { fontSize: 12, fontWeight: 900, letterSpacing: 0.2, textTransform: "uppercase" };
 }
 
-function primaryBtn() {
+function primaryBtn(disabled) {
   return {
     padding: "10px 12px",
     borderRadius: 10,
     border: "1px solid #111827",
-    background: "#111827",
-    color: "#f9fafb",
+    background: disabled ? "#e5e7eb" : "#111827",
+    color: disabled ? "#6b7280" : "#f9fafb",
     fontSize: 13,
     fontWeight: 900,
-    cursor: "pointer",
+    cursor: disabled ? "not-allowed" : "pointer",
+    whiteSpace: "nowrap",
   };
 }
 
-function ghostBtn() {
+function uploadBtn(locked) {
+  return {
+    display: "inline-block",
+    padding: "8px 12px",
+    borderRadius: 10,
+    background: locked ? "#e5e7eb" : "#d1fae5",
+    color: locked ? "#6b7280" : "#065f46",
+    fontSize: 12,
+    fontWeight: 900,
+    cursor: locked ? "not-allowed" : "pointer",
+    border: locked ? "1px solid #d1d5db" : "1px solid #a7f3d0",
+    whiteSpace: "nowrap",
+  };
+}
+
+function lockBtn(locked) {
+  const base = { padding: "8px 10px", borderRadius: 10, fontSize: 12, fontWeight: 900, cursor: "pointer" };
+  if (!locked) return { ...base, border: "1px solid #a7f3d0", background: "#d1fae5", color: "#065f46" };
+  return { ...base, border: "1px solid #fecaca", background: "#fee2e2", color: "#991b1b" };
+}
+
+function plusPill() {
+  return {
+    width: 26,
+    height: 26,
+    borderRadius: 999,
+    border: "1px solid #e5e7eb",
+    background: "#fff",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: 14,
+    fontWeight: 900,
+    opacity: 0.7,
+    userSelect: "none",
+  };
+}
+
+function resetBtn() {
   return {
     padding: "10px 12px",
     borderRadius: 10,
@@ -639,45 +1199,45 @@ function ghostBtn() {
     fontSize: 13,
     fontWeight: 900,
     cursor: "pointer",
+    whiteSpace: "nowrap",
   };
 }
 
-function lockBtn(locked) {
+function tinyPlayBtn(enabled) {
   return {
-    padding: "8px 10px",
-    borderRadius: 10,
-    border: "1px solid #d1d5db",
-    background: locked ? "#ef4444" : "#fff",
-    color: locked ? "#fff" : "#111827",
-    fontSize: 12,
-    fontWeight: 900,
-    cursor: "pointer",
-  };
-}
-
-function playBtn(enabled) {
-  return {
-    padding: "8px 10px",
-    borderRadius: 10,
+    width: 34,
+    height: 34,
+    borderRadius: 999,
     border: "1px solid #111827",
     background: enabled ? "#111827" : "#e5e7eb",
     color: enabled ? "#f9fafb" : "#6b7280",
     fontSize: 12,
     fontWeight: 900,
     cursor: enabled ? "pointer" : "not-allowed",
-    width: 70,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
   };
 }
 
-function resetBtn() {
+function okBox() {
   return {
-    padding: "8px 10px",
-    borderRadius: 10,
-    border: "1px solid #d1d5db",
-    background: "#fff",
-    color: "#111827",
     fontSize: 12,
-    fontWeight: 900,
-    cursor: "pointer",
+    color: "#065f46",
+    background: "#d1fae5",
+    border: "1px solid #a7f3d0",
+    padding: 10,
+    borderRadius: 12,
+  };
+}
+
+function errorBox() {
+  return {
+    fontSize: 12,
+    color: "#991b1b",
+    background: "#fee2e2",
+    border: "1px solid #fecaca",
+    padding: 10,
+    borderRadius: 12,
   };
 }

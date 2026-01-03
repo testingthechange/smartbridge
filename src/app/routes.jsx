@@ -25,7 +25,6 @@ function MiniSiteProjectRedirect() {
   const token = params.get("token") || "demo";
 
   // Extract projectId from the URL path: /minisite/:projectId
-  // This avoids adding another dependency/import just for useParams here.
   const parts = window.location.pathname.split("/").filter(Boolean);
   const projectId = parts.length >= 2 ? parts[1] : "demo";
 

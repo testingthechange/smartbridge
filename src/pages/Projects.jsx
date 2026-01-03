@@ -1,6 +1,14 @@
 // src/pages/Projects.jsx
 import React, { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
+
+/**
+ * Producer-scoped Projects list
+ *
+ * Storage:
+ * - sb:projects_index:<producerId> = array of rows for that producer only
+ * - project_<projectId> = per-project working state (Catalog/Album/etc)
+ */
 
 function safeParse(json) {
   try {
@@ -18,48 +26,144 @@ function projectKey(projectId) {
   return `project_${projectId}`;
 }
 
+function indexKey(producerId) {
+  return `sb:projects_index:${String(producerId || "no-producer")}`;
+}
+
 function generate6DigitId(existingIdsSet) {
-  // best-effort unique
   for (let i = 0; i < 50; i++) {
     const n = Math.floor(Math.random() * 900000) + 100000;
     const id = String(n);
     if (!existingIdsSet.has(id)) return id;
   }
-  // fallback
   return String(Date.now()).slice(-6);
 }
 
-function loadProjectsIndex() {
-  const raw = localStorage.getItem("projects_index");
+function loadProjectsIndex(producerId) {
+  const raw = localStorage.getItem(indexKey(producerId));
   const parsed = raw ? safeParse(raw) : null;
-  if (Array.isArray(parsed)) return parsed;
-  return [];
+  return Array.isArray(parsed) ? parsed : [];
 }
 
-function saveProjectsIndex(rows) {
-  localStorage.setItem("projects_index", JSON.stringify(rows || []));
+function saveProjectsIndex(producerId, rows) {
+  localStorage.setItem(indexKey(producerId), JSON.stringify(Array.isArray(rows) ? rows : []));
+}
+
+/**
+ * Derive status from the project_{id} blob.
+ * This avoids needing Project page to update the index row.
+ */
+function deriveStatusFromProjectBlob(projectId) {
+  const raw = localStorage.getItem(projectKey(projectId));
+  const p = raw ? safeParse(raw) : null;
+
+  if (!p || typeof p !== "object") {
+    return {
+      isMasterSaved: false,
+      masterSavedAt: "",
+      producerReturnReceived: false,
+      producerReturnReceivedAt: "",
+      lastSnapshotKey: "",
+      publish: {
+        lastShareId: "",
+        lastPublicUrl: "",
+        publishedAt: "",
+        manifestKey: "",
+        snapshotKey: "",
+      },
+    };
+  }
+
+  const catalogSavedAt = safeString(p?.catalog?.masterSave?.savedAt);
+  const catalogS3Path = safeString(p?.catalog?.masterSave?.s3Path);
+
+  const unifiedSavedAt = safeString(p?.masterSave?.lastMasterSaveAt || "");
+  const unifiedCatalogComplete = !!p?.masterSave?.sections?.catalog?.complete;
+
+  const isMasterSaved = !!catalogSavedAt || !!unifiedSavedAt || !!unifiedCatalogComplete;
+  const masterSavedAt = catalogSavedAt || unifiedSavedAt || safeString(p?.masterSave?.sections?.catalog?.masterSavedAt);
+
+  const producerReturnReceived = !!p?.master?.producerReturnReceived || !!p?.masterSave?.producerReturnReceived;
+  const producerReturnReceivedAt =
+    safeString(p?.master?.producerReturnReceivedAt) || safeString(p?.masterSave?.producerReturnReceivedAt);
+
+  const lastSnapshotKey = catalogS3Path || safeString(p?.master?.lastSnapshotKey) || "";
+
+  const publish = {
+    lastShareId: safeString(p?.publish?.lastShareId),
+    lastPublicUrl: safeString(p?.publish?.lastPublicUrl),
+    publishedAt: safeString(p?.publish?.publishedAt),
+    manifestKey: safeString(p?.publish?.manifestKey),
+    snapshotKey: safeString(p?.publish?.snapshotKey),
+  };
+
+  return {
+    isMasterSaved,
+    masterSavedAt,
+    producerReturnReceived,
+    producerReturnReceivedAt,
+    lastSnapshotKey,
+    publish,
+  };
 }
 
 export default function Projects() {
-  const [rows, setRows] = useState(() => loadProjectsIndex());
+  const { producerId } = useParams();
+
+  const [rows, setRows] = useState(() => loadProjectsIndex(producerId));
 
   const [form, setForm] = useState({
     projectName: "",
     date: "",
-    producer: "",
     company: "",
   });
 
+  // Persist rows (producer-scoped)
   useEffect(() => {
-    saveProjectsIndex(rows);
-  }, [rows]);
+    saveProjectsIndex(producerId, rows);
+  }, [rows, producerId]);
 
-  const existingIds = useMemo(() => new Set(rows.map((r) => String(r.projectId))), [rows]);
+  const existingIds = useMemo(() => new Set((rows || []).map((r) => String(r.projectId))), [rows]);
+
+  // Re-derive status from project_{id} whenever we land here or list length changes
+  useEffect(() => {
+    if (!producerId) return;
+
+    setRows((prev) =>
+      (prev || []).map((r) => {
+        const derived = deriveStatusFromProjectBlob(r.projectId);
+
+        return {
+          ...r,
+          master: {
+            ...(r.master || {}),
+            isMasterSaved: derived.isMasterSaved,
+            masterSavedAt: derived.masterSavedAt || r?.master?.masterSavedAt || "",
+            lastSnapshotKey: derived.lastSnapshotKey || r?.master?.lastSnapshotKey || "",
+            producerReturnReceived: derived.producerReturnReceived || !!r?.master?.producerReturnReceived,
+            producerReturnReceivedAt: derived.producerReturnReceivedAt || r?.master?.producerReturnReceivedAt || "",
+          },
+          publish: {
+            ...(r.publish || {}),
+            lastShareId: derived.publish.lastShareId || r?.publish?.lastShareId || "",
+            lastPublicUrl: derived.publish.lastPublicUrl || r?.publish?.lastPublicUrl || "",
+            publishedAt: derived.publish.publishedAt || r?.publish?.publishedAt || "",
+            manifestKey: derived.publish.manifestKey || r?.publish?.manifestKey || "",
+            snapshotKey: derived.publish.snapshotKey || r?.publish?.snapshotKey || "",
+          },
+        };
+      })
+    );
+  }, [producerId, rows?.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onCreate = () => {
     const projectName = safeString(form.projectName);
     if (!projectName) {
       window.alert("Project Name required.");
+      return;
+    }
+    if (!producerId) {
+      window.alert("Missing producerId in route.");
       return;
     }
 
@@ -70,20 +174,11 @@ export default function Projects() {
       projectId,
       projectName,
       date: safeString(form.date),
-      producer: safeString(form.producer),
+      producerId: safeString(producerId),
       company: safeString(form.company),
       createdAt: nowIso,
       updatedAt: nowIso,
-
-      // magic link state
-      magic: {
-        token: "",
-        active: false,
-        expiresAt: "",
-        sentAt: "",
-      },
-
-      // master save state
+      magic: { token: "", active: false, expiresAt: "", sentAt: "" },
       master: {
         isMasterSaved: false,
         masterSavedAt: "",
@@ -91,80 +186,83 @@ export default function Projects() {
         producerReturnReceived: false,
         producerReturnReceivedAt: "",
       },
+      publish: {
+        lastShareId: "",
+        lastPublicUrl: "",
+        publishedAt: "",
+        manifestKey: "",
+        snapshotKey: "",
+      },
     };
 
-    // seed project storage object
-    const key = projectKey(projectId);
     const seed = {
       projectId,
       projectName,
-      producer: newRow.producer,
+      producerId: newRow.producerId,
       company: newRow.company,
       date: newRow.date,
       createdAt: nowIso,
       updatedAt: nowIso,
       catalog: { songs: [] },
       album: { meta: {} },
+      nftMix: {},
+      songs: {},
       meta: { songs: [] },
       magic: newRow.magic,
       master: newRow.master,
+      publish: newRow.publish,
     };
-    localStorage.setItem(key, JSON.stringify(seed));
+    localStorage.setItem(projectKey(projectId), JSON.stringify(seed));
 
-    setRows((prev) => [newRow, ...prev]);
-    setForm({ projectName: "", date: "", producer: "", company: "" });
+    setRows((prev) => [newRow, ...(prev || [])]);
+    setForm({ projectName: "", date: "", company: "" });
   };
 
   return (
     <div style={{ maxWidth: 1100 }}>
       <div style={{ fontSize: 26, fontWeight: 900, color: "#0f172a" }}>Projects</div>
       <div style={{ marginTop: 6, fontSize: 13, opacity: 0.75 }}>
-        Create projects here. Clicking a Project ID opens the Project page (magic link + status).
+        Producer: <span style={{ fontFamily: "monospace", fontWeight: 900 }}>{producerId}</span>
       </div>
 
-      <div
-        style={{
-          marginTop: 14,
-          border: "1px solid #e5e7eb",
-          borderRadius: 16,
-          padding: 14,
-          background: "#fff",
-        }}
-      >
+      <div style={{ marginTop: 14, border: "1px solid #e5e7eb", borderRadius: 16, padding: 14, background: "#fff" }}>
         <div style={{ fontSize: 16, fontWeight: 900, color: "#0f172a" }}>Create Project</div>
 
-        <div
-          style={{
-            marginTop: 10,
-            display: "grid",
-            gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-            gap: 12,
-          }}
-        >
+        <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
           <Field
             label="Project Name"
             value={form.projectName}
             onChange={(v) => setForm((p) => ({ ...p, projectName: v }))}
             placeholder="e.g. Maya — Album Return"
           />
-          <Field
-            label="Date"
-            value={form.date}
-            onChange={(v) => setForm((p) => ({ ...p, date: v }))}
-            placeholder="YYYY-MM-DD"
-          />
-          <Field
-            label="Producer"
-            value={form.producer}
-            onChange={(v) => setForm((p) => ({ ...p, producer: v }))}
-            placeholder="Producer name"
-          />
+
+          <Field label="Date" type="date" value={form.date} onChange={(v) => setForm((p) => ({ ...p, date: v }))} />
+
           <Field
             label="Company"
             value={form.company}
             onChange={(v) => setForm((p) => ({ ...p, company: v }))}
             placeholder="Company / label"
           />
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>Producer ID</div>
+            <input
+              value={safeString(producerId)}
+              readOnly
+              style={{
+                padding: "12px 12px",
+                borderRadius: 12,
+                border: "1px solid #e5e7eb",
+                fontSize: 15,
+                outline: "none",
+                background: "#f8fafc",
+                fontFamily: "monospace",
+                fontWeight: 900,
+                color: "#0f172a",
+              }}
+            />
+          </div>
         </div>
 
         <div style={{ marginTop: 12 }}>
@@ -193,27 +291,61 @@ export default function Projects() {
           <div style={{ display: "flex", padding: 12, background: "#f8fafc", borderBottom: "1px solid #e5e7eb" }}>
             <div style={{ width: 110, fontWeight: 900, fontSize: 12, opacity: 0.7 }}>Project ID</div>
             <div style={{ flex: 1, fontWeight: 900, fontSize: 12, opacity: 0.7 }}>Project</div>
-            <div style={{ width: 170, fontWeight: 900, fontSize: 12, opacity: 0.7 }}>Producer</div>
-            <div style={{ width: 150, fontWeight: 900, fontSize: 12, opacity: 0.7 }}>Status</div>
+            <div style={{ width: 170, fontWeight: 900, fontSize: 12, opacity: 0.7 }}>Company</div>
+            <div style={{ width: 260, fontWeight: 900, fontSize: 12, opacity: 0.7 }}>Status</div>
           </div>
 
           {(rows || []).map((r) => {
             const isMasterSaved = !!r?.master?.isMasterSaved;
             const returnReceived = !!r?.master?.producerReturnReceived;
+            const published = !!r?.publish?.lastPublicUrl;
+
             return (
               <div
                 key={r.projectId}
-                style={{ display: "flex", padding: 12, borderBottom: "1px solid #eef2f7", background: "#fff" }}
+                style={{
+                  display: "flex",
+                  padding: 12,
+                  borderBottom: "1px solid #eef2f7",
+                  background: "#fff",
+                  alignItems: "center",
+                }}
               >
                 <div style={{ width: 110, fontFamily: "monospace", fontWeight: 900 }}>
-                  <Link to={`/projects/${r.projectId}`} style={{ textDecoration: "none", color: "#111827" }}>
+                  <Link to={`/projects/${r.projectId}`} style={{ textDecoration: "none", color: "#111827" }} title="Open project">
                     {r.projectId}
                   </Link>
                 </div>
+
                 <div style={{ flex: 1, fontWeight: 800, color: "#0f172a" }}>{r.projectName}</div>
-                <div style={{ width: 170, opacity: 0.85 }}>{r.producer || "—"}</div>
-                <div style={{ width: 150, fontWeight: 900 }}>
-                  {returnReceived ? "✅ Return" : isMasterSaved ? "✅ Master" : "—"}
+
+                <div style={{ width: 170, opacity: 0.85 }}>{r.company || "—"}</div>
+
+                <div style={{ width: 260, fontWeight: 900, display: "flex", gap: 10, alignItems: "center" }}>
+                  <span title={r?.master?.masterSavedAt ? `Master saved at ${r.master.masterSavedAt}` : ""}>
+                    {returnReceived ? "✅ Return" : isMasterSaved ? "✅ Master" : "—"}
+                  </span>
+
+                  {published ? (
+                    <a
+                      href={r.publish.lastPublicUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{
+                        textDecoration: "none",
+                        fontWeight: 900,
+                        fontSize: 12,
+                        border: "1px solid #d1d5db",
+                        background: "#f8fafc",
+                        color: "#111827",
+                        padding: "6px 10px",
+                        borderRadius: 999,
+                      }}
+                      title="Open published mini-site"
+                    >
+                      ✅ Published
+                    </a>
+                  ) : null}
                 </div>
               </div>
             );
@@ -226,14 +358,16 @@ export default function Projects() {
   );
 }
 
-function Field({ label, value, onChange, placeholder }) {
+function Field({ label, type = "text", value, onChange, placeholder }) {
+  const isDate = type === "date";
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>{label}</div>
       <input
+        type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
+        placeholder={isDate ? undefined : placeholder}
         style={{
           padding: "12px 12px",
           borderRadius: 12,

@@ -62,6 +62,9 @@ export default function App() {
           <Route path="/minisite/:projectId/nft-mix" element={<NftMix />} />
           <Route path="/minisite/:projectId/songs" element={<Songs />} />
 
+          {/* ✅ FIX: Export route inside minisite */}
+          <Route path="/minisite/:projectId/export" element={<ExportTools />} />
+
           {/* Default */}
           <Route path="/" element={<Navigate to="/producer" replace />} />
           <Route path="*" element={<Navigate to="/producer" replace />} />

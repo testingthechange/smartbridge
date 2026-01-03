@@ -1,9 +1,11 @@
+// src/app/App.jsx
 import React from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 
 import SideNav from "../components/SideNav.jsx";
 import TopBar from "../components/TopBar.jsx";
 
+// Pages
 import Login from "../pages/Login.jsx";
 import Admin from "../pages/Admin.jsx";
 import Producer from "../pages/Producer.jsx";
@@ -11,6 +13,7 @@ import Projects from "../pages/Projects.jsx";
 import Project from "../pages/Project.jsx";
 import ExportTools from "../pages/ExportTools.jsx";
 
+// Mini-site
 import MiniSiteLayout from "../minisite/MiniSiteLayout.jsx";
 import Catalog from "../minisite/Catalog.jsx";
 import Album from "../minisite/Album.jsx";
@@ -21,7 +24,7 @@ import Meta from "../minisite/Meta.jsx";
 export default function App() {
   return (
     <div style={{ display: "flex", minHeight: "100vh" }}>
-      {/* LEFT: Side Nav (admin / internal only) */}
+      {/* LEFT: Side Nav */}
       <SideNav />
 
       {/* RIGHT: Main content */}
@@ -31,19 +34,19 @@ export default function App() {
         <div style={{ flex: 1, padding: 24 }}>
           <Routes>
             {/* Default */}
-            <Route path="/" element={<Navigate to="/producer" />} />
+            <Route path="/" element={<Navigate to="/producer" replace />} />
 
             {/* Auth / Admin */}
             <Route path="/login" element={<Login />} />
             <Route path="/admin" element={<Admin />} />
 
-            {/* Internal producer workflow */}
+            {/* Internal workflow */}
             <Route path="/producer" element={<Producer />} />
             <Route path="/projects" element={<Projects />} />
-            <Route path="/project/:projectId" element={<Project />} />
+            <Route path="/projects/:projectId" element={<Project />} />
             <Route path="/export-tools" element={<ExportTools />} />
 
-            {/* MINI-SITE (magic link / worksheet) */}
+            {/* MINI-SITE */}
             <Route path="/minisite/:projectId" element={<MiniSiteLayout />}>
               <Route path="catalog" element={<Catalog />} />
               <Route path="album" element={<Album />} />
@@ -51,6 +54,9 @@ export default function App() {
               <Route path="songs" element={<Songs />} />
               <Route path="meta" element={<Meta />} />
             </Route>
+
+            {/* Fallback */}
+            <Route path="*" element={<Navigate to="/producer" replace />} />
           </Routes>
         </div>
       </div>

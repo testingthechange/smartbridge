@@ -1,0 +1,121 @@
+{
+  "projectId": "826074",
+  "createdAt": "2026-01-03T06:08:15.186Z",
+  "source": "minisite-master-save",
+  "data": {
+    "catalog": {
+      "songs": [
+        {
+          "slot": 1,
+          "title": "Track 01",
+          "files": {
+            "album": {
+              "s3Key": "storage/projects/826074/audio/mp3/track01.mp3"
+            }
+          }
+        },
+        {
+          "slot": 2,
+          "title": "Track 02",
+          "files": {
+            "album": {
+              "s3Key": "storage/projects/826074/audio/mp3/track02.mp3"
+            }
+          }
+        }
+      ]
+    },
+    "album": {
+      "title": "Beta Max",
+      "artist": "The LBC 73OG",
+      "releaseDate": "12-25-2025",
+      "bpm": "",
+      "genre": "EDM",
+      "durationSeconds": 0,
+      "playlistOrder": [
+        "slot-1",
+        "slot-2",
+        "slot-3",
+        "slot-4",
+        "slot-5",
+        "slot-6",
+        "slot-7",
+        "slot-8",
+        "slot-9"
+      ],
+      "songTitles": [
+        {
+          "slot": 1,
+          "title": "Track 01"
+        },
+        {
+          "slot": 2,
+          "title": "Track 02"
+        },
+        {
+          "slot": 3,
+          "title": "Album Track"
+        },
+        {
+          "slot": 4,
+          "title": "Album Track"
+        },
+        {
+          "slot": 5,
+          "title": "Album Track"
+        },
+        {
+          "slot": 6,
+          "title": "Album Track"
+        },
+        {
+          "slot": 7,
+          "title": "Album Track"
+        },
+        {
+          "slot": 8,
+          "title": "Album Track"
+        },
+        {
+          "slot": 9,
+          "title": "Album Track"
+        }
+      ],
+      "media": {
+        "cover": {
+          "fileName": "ChatGPT Image Oct 22, 2025, 10_03_16 PM.png",
+          "mime": "image/png",
+          "bytes": 2240472,
+          "sizeHint": "3000 × 3000 (JPG)",
+          "s3Key": "storage/projects/826074/album/cover/1766768508421_ChatGPT_Image_Oct_22_2025_10_03_16_PM.png",
+          "local": {
+            "storeKey": "albumCover:826074",
+            "storage": "indexeddb"
+          }
+        },
+        "slideshow": [
+          {
+            "id": "8e9c3762-4080-4af9-9c7e-04aa6afcaafa",
+            "fileName": "gettyimages-1367213883-612x612.jpg",
+            "mime": "image/jpeg",
+            "bytes": 30256,
+            "s3Key": "storage/projects/826074/album/slideshow/8e9c3762-4080-4af9-9c7e-04aa6afcaafa_gettyimages-1367213883-612x612.jpg",
+            "local": {
+              "storeKey": "albumSlide:826074:8e9c3762-4080-4af9-9c7e-04aa6afcaafa",
+              "storage": "indexeddb"
+            }
+          }
+        ]
+      }
+    },
+    "masterSave": {
+      "lastMasterSaveAt": "2026-01-03T06:08:15.163Z",
+      "sections": {
+        "album": {
+          "complete": true,
+          "masterSavedAt": "2026-01-03T06:08:15.163Z"
+        }
+      }
+    }
+  }
+}

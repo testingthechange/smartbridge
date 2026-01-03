@@ -24,10 +24,16 @@ a:hover {
 
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
   min-width: 320px;
   min-height: 100vh;
+
+  /* ✅ stop global centering flicker */
+  display: block;
+}
+
+/* ✅ make the app layout stable/full-width */
+#root {
+  width: 100%;
 }
 
 h1 {
@@ -52,6 +58,22 @@ button:hover {
 button:focus,
 button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
+}
+
+/* ✅ Smart Bridge mini EQ pulse */
+@keyframes sbEqPulse {
+  0% {
+    transform: scaleY(0.35);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scaleY(0.45);
+    opacity: 0.65;
+  }
 }
 
 @media (prefers-color-scheme: light) {

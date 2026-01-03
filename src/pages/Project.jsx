@@ -10,316 +10,219 @@ function safeParse(json) {
   }
 }
 
+function safeString(v) {
+  return String(v ?? "").trim();
+}
+
 function projectKey(projectId) {
   return `project_${projectId}`;
 }
 
-function loadProjectsIndex() {
-  const raw = localStorage.getItem("projects_index");
-  const parsed = raw ? safeParse(raw) : null;
-  return Array.isArray(parsed) ? parsed : [];
+function indexKey(producerId) {
+  return `sb:projects_index:${String(producerId || "no-producer")}`;
 }
 
-function saveProjectsIndex(rows) {
-  localStorage.setItem("projects_index", JSON.stringify(rows || []));
-}
-
-function loadProject(projectId) {
+function loadProjectLocal(projectId) {
   const raw = localStorage.getItem(projectKey(projectId));
   const parsed = raw ? safeParse(raw) : null;
   return parsed && typeof parsed === "object" ? parsed : null;
 }
 
-function saveProject(projectId, nextObj) {
-  localStorage.setItem(projectKey(projectId), JSON.stringify(nextObj));
-}
+function loadPublishFromProducerIndex(producerId, projectId) {
+  if (!producerId || !projectId) return null;
+  const raw = localStorage.getItem(indexKey(producerId));
+  const rows = raw ? safeParse(raw) : null;
+  if (!Array.isArray(rows)) return null;
 
-function makeToken() {
-  return `ml_${Math.random().toString(16).slice(2)}_${Date.now().toString(16)}`;
-}
+  const row = rows.find((r) => String(r?.projectId) === String(projectId));
+  const p = row?.publish || null;
+  if (!p || typeof p !== "object") return null;
 
-function addHoursIso(hours) {
-  const d = new Date();
-  d.setHours(d.getHours() + hours);
-  return d.toISOString();
+  return {
+    lastShareId: safeString(p.lastShareId),
+    lastPublicUrl: safeString(p.lastPublicUrl),
+    manifestKey: safeString(p.manifestKey),
+    publishedAt: safeString(p.publishedAt),
+    snapshotKey: safeString(p.snapshotKey),
+  };
 }
 
 export default function Project() {
   const { projectId } = useParams();
+  const [snap, setSnap] = useState(null);
 
-  const [indexRows, setIndexRows] = useState(() => loadProjectsIndex());
-  const [project, setProject] = useState(() => loadProject(projectId));
-
+  // load on mount / project change
   useEffect(() => {
-    setIndexRows(loadProjectsIndex());
-    setProject(loadProject(projectId));
+    if (!projectId) return;
+    setSnap(loadProjectLocal(projectId));
   }, [projectId]);
 
-  const row = useMemo(() => indexRows.find((r) => String(r.projectId) === String(projectId)) || null, [indexRows, projectId]);
+  // refresh on focus (coming back from Export page)
+  useEffect(() => {
+    const onFocus = () => {
+      if (!projectId) return;
+      setSnap(loadProjectLocal(projectId));
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [projectId]);
 
-  const magic = project?.magic || row?.magic || { token: "", active: false, expiresAt: "", sentAt: "" };
-  const master = project?.master || row?.master || { isMasterSaved: false, masterSavedAt: "", lastSnapshotKey: "" };
+  // refresh if localStorage changes (same-tab writes won't fire storage event, but other tabs will)
+  useEffect(() => {
+    const onStorage = (e) => {
+      if (!projectId) return;
+      if (e?.key === projectKey(projectId) || e?.key?.includes("sb:projects_index:")) {
+        setSnap(loadProjectLocal(projectId));
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [projectId]);
 
-  const miniBase = `/minisite/${projectId}`;
-  const tokenQuery = magic?.token ? `?token=${encodeURIComponent(magic.token)}` : `?token=demo`;
+  const producerId = safeString(snap?.producerId);
 
-  const miniLinks = [
-    { label: "Catalog", to: `${miniBase}/catalog${tokenQuery}` },
-    { label: "Album", to: `${miniBase}/album${tokenQuery}` },
-    { label: "Meta", to: `${miniBase}/meta${tokenQuery}` },
-  ];
-
-  const updateEverywhere = (nextProject, patchRowFn) => {
-    // project storage
-    saveProject(projectId, nextProject);
-    setProject(nextProject);
-
-    // index row mirror
-    const nextRows = indexRows.map((r) => {
-      if (String(r.projectId) !== String(projectId)) return r;
-      const base = { ...r };
-      return patchRowFn ? patchRowFn(base) : base;
-    });
-    saveProjectsIndex(nextRows);
-    setIndexRows(nextRows);
-  };
-
-  const onCreateOrResendMagic = () => {
-    const now = new Date().toISOString();
-    const nextToken = magic?.token || makeToken();
-
-    const nextMagic = {
-      token: nextToken,
-      active: true,
-      sentAt: now,
-      expiresAt: addHoursIso(72), // 3 days default
+  // ✅ publish: prefer project blob; fallback to producer index row
+  const pub = useMemo(() => {
+    const p = snap?.publish || {};
+    const fromBlob = {
+      lastShareId: safeString(p.lastShareId),
+      lastPublicUrl: safeString(p.lastPublicUrl),
+      manifestKey: safeString(p.manifestKey),
+      publishedAt: safeString(p.publishedAt),
+      snapshotKey: safeString(p.snapshotKey),
     };
 
-    const nextProject = {
-      ...(project || {}),
-      projectId,
-      magic: nextMagic,
-      updatedAt: now,
-    };
+    const hasAny =
+      !!fromBlob.lastShareId || !!fromBlob.lastPublicUrl || !!fromBlob.manifestKey || !!fromBlob.publishedAt || !!fromBlob.snapshotKey;
 
-    updateEverywhere(nextProject, (r) => ({ ...r, magic: nextMagic, updatedAt: now }));
+    if (hasAny) return fromBlob;
 
-    const url = `${window.location.origin}${miniBase}/catalog?token=${encodeURIComponent(nextToken)}`;
-    window.alert(`Magic link ready (same token reused if already active):\n${url}`);
-  };
+    const fromIndex = loadPublishFromProducerIndex(producerId, projectId);
+    return fromIndex || fromBlob;
+  }, [snap, producerId, projectId]);
 
-  const onExpireMagic = () => {
-    const now = new Date().toISOString();
-
-    const nextMagic = {
-      ...(magic || {}),
-      active: false,
-      expiresAt: now,
-    };
-
-    const nextProject = {
-      ...(project || {}),
-      projectId,
-      magic: nextMagic,
-      updatedAt: now,
-    };
-
-    updateEverywhere(nextProject, (r) => ({ ...r, magic: nextMagic, updatedAt: now }));
-  };
-
-  if (!project && !row) {
-    return (
-      <div style={{ maxWidth: 1000 }}>
-        <div style={{ fontSize: 22, fontWeight: 900 }}>Project not found</div>
-        <div style={{ marginTop: 10 }}>
-          <Link to="/projects">Back to Projects</Link>
-        </div>
-      </div>
-    );
-  }
-
-  const displayName = project?.projectName || row?.projectName || "(Untitled)";
-  const producer = project?.producer || row?.producer || "—";
-  const company = project?.company || row?.company || "—";
-  const date = project?.date || row?.date || "—";
+  const backHref = producerId ? `/producer/${encodeURIComponent(producerId)}/projects` : null;
 
   return (
-    <div style={{ maxWidth: 1050 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
-        <div>
-          <div style={{ fontSize: 24, fontWeight: 900, color: "#0f172a" }}>
-            Project <span style={{ fontFamily: "monospace" }}>{projectId}</span> — {displayName}
+    <div style={{ maxWidth: 1100 }}>
+      <div style={{ fontSize: 34, fontWeight: 900, color: "#0f172a" }}>{snap?.projectName || "Project"}</div>
+
+      <div style={{ marginTop: 6, fontSize: 13, opacity: 0.75 }}>
+        Project ID: <strong>{projectId}</strong> · Producer: <strong>{producerId || "—"}</strong>
+      </div>
+
+      <div style={{ marginTop: 14, ...card() }}>
+        <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>Mini-site</div>
+
+        <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <Link to={`/minisite/${projectId}/catalog`} style={pill()}>
+            Catalog
+          </Link>
+          <Link to={`/minisite/${projectId}/album`} style={pill()}>
+            Album
+          </Link>
+          <Link to={`/minisite/${projectId}/nft-mix`} style={pill()}>
+            NFT Mix
+          </Link>
+          <Link to={`/minisite/${projectId}/songs`} style={pill()}>
+            Songs
+          </Link>
+          <Link to={`/minisite/${projectId}/meta`} style={pill()}>
+            Meta
+          </Link>
+        </div>
+
+        <div style={{ marginTop: 12, fontSize: 12, opacity: 0.7 }}>
+          Status badges (✅ Master / ✅ Return / ✅ Published) are shown on the Projects list page.
+        </div>
+      </div>
+
+      <div style={{ marginTop: 14, ...card() }}>
+        <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>Publish</div>
+
+        <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.7 }}>
+          <div>
+            Published At: {pub?.publishedAt ? <code>{pub.publishedAt}</code> : <span style={{ opacity: 0.65 }}>—</span>}
           </div>
-          <div style={{ marginTop: 6, fontSize: 13, opacity: 0.75 }}>
-            Producer: <strong>{producer}</strong> • Company: <strong>{company}</strong> • Date: <strong>{date}</strong>
+          <div>
+            Share ID: {pub?.lastShareId ? <code>{pub.lastShareId}</code> : <span style={{ opacity: 0.65 }}>—</span>}
           </div>
-          <div style={{ marginTop: 8 }}>
-            <Link to="/projects" style={{ fontSize: 13 }}>
-              ← Back to Projects
+          <div>
+            Manifest Key: {pub?.manifestKey ? <code>{pub.manifestKey}</code> : <span style={{ opacity: 0.65 }}>—</span>}
+          </div>
+          <div>
+            Public URL:{" "}
+            {pub?.lastPublicUrl ? (
+              <a href={pub.lastPublicUrl} target="_blank" rel="noreferrer">
+                {pub.lastPublicUrl}
+              </a>
+            ) : (
+              <span style={{ opacity: 0.65 }}>—</span>
+            )}
+          </div>
+          <div>
+            Snapshot Key: {pub?.snapshotKey ? <code>{pub.snapshotKey}</code> : <span style={{ opacity: 0.65 }}>—</span>}
+          </div>
+
+          <div style={{ marginTop: 10 }}>
+            <Link to={`/minisite/${projectId}/export`} style={ghostLink()}>
+              Go to Export / Tools
             </Link>
           </div>
         </div>
-
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <a
-            href={`${miniBase}/catalog${tokenQuery}`}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 12,
-              border: "1px solid #111827",
-              background: "#111827",
-              color: "#fff",
-              fontWeight: 900,
-              textDecoration: "none",
-              fontSize: 13,
-            }}
-          >
-            Open Mini-site
-          </a>
-        </div>
       </div>
 
-      {/* Master Save status */}
-      <div style={panel()}>
-        <div style={panelTitle()}>Master Save Status</div>
-
-        <div style={{ marginTop: 10, display: "flex", gap: 12, flexWrap: "wrap" }}>
-          <Pill ok={!!master?.isMasterSaved} label={master?.isMasterSaved ? "Master Saved" : "Not Master Saved"} />
-          <div style={{ fontSize: 13, opacity: 0.8 }}>
-            Saved at:{" "}
-            <span style={{ fontFamily: "monospace", fontWeight: 900 }}>{master?.masterSavedAt || "—"}</span>
-          </div>
-          <div style={{ fontSize: 13, opacity: 0.8 }}>
-            Snapshot key:{" "}
-            <span style={{ fontFamily: "monospace", fontWeight: 900 }}>{master?.lastSnapshotKey || "—"}</span>
-          </div>
-        </div>
+      <div style={{ marginTop: 14 }}>
+        <div style={{ fontSize: 14, fontWeight: 900, color: "#0f172a" }}>Local project snapshot (debug)</div>
+        <pre style={pre()}>{snap ? JSON.stringify(snap, null, 2) : "{\n  \n}"}</pre>
       </div>
 
-      {/* Magic link */}
-      <div style={panel()}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-          <div style={panelTitle()}>Magic Link</div>
-
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button type="button" onClick={onCreateOrResendMagic} style={primaryBtn()}>
-              {magic?.token ? "Resend Magic Link" : "Create Magic Link"}
-            </button>
-
-            <button type="button" onClick={onExpireMagic} style={dangerBtn()} disabled={!magic?.token}>
-              Expire
-            </button>
-          </div>
-        </div>
-
-        <div style={{ marginTop: 10, fontSize: 13, opacity: 0.8 }}>
-          Status:{" "}
-          <strong style={{ color: magic?.active ? "#065f46" : "#9f1239" }}>
-            {magic?.token ? (magic?.active ? "ACTIVE" : "INACTIVE") : "NONE"}
-          </strong>
-        </div>
-
-        <div style={{ marginTop: 8, fontSize: 13, opacity: 0.8 }}>
-          Token: <span style={{ fontFamily: "monospace", fontWeight: 900 }}>{magic?.token || "—"}</span>
-        </div>
-
-        <div style={{ marginTop: 8, fontSize: 13, opacity: 0.8 }}>
-          Sent: <span style={{ fontFamily: "monospace", fontWeight: 900 }}>{magic?.sentAt || "—"}</span>
-        </div>
-
-        <div style={{ marginTop: 8, fontSize: 13, opacity: 0.8 }}>
-          Expires: <span style={{ fontFamily: "monospace", fontWeight: 900 }}>{magic?.expiresAt || "—"}</span>
-        </div>
-
-        <div style={{ marginTop: 12, fontSize: 13 }}>
-          Mini-site link (Catalog):{" "}
-          <a href={`${miniBase}/catalog${tokenQuery}`} style={{ fontFamily: "monospace" }}>
-            {`${window.location.origin}${miniBase}/catalog${tokenQuery}`}
-          </a>
-        </div>
-      </div>
-
-      {/* Mini links */}
-      <div style={panel()}>
-        <div style={panelTitle()}>Mini-site Sections</div>
-
-        <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-          {miniLinks.map((x) => (
-            <a key={x.label} href={x.to} style={secondaryLink()}>
-              {x.label}
-            </a>
-          ))}
-        </div>
+      <div style={{ marginTop: 12 }}>
+        {backHref ? (
+          <Link to={backHref} style={ghostLink()}>
+            ← Back to producer projects
+          </Link>
+        ) : (
+          <span style={{ ...ghostLink(), opacity: 0.5 }}>← Back to producer projects</span>
+        )}
       </div>
     </div>
   );
 }
 
-function panel() {
+function card() {
+  return { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: 16 };
+}
+
+function pill() {
   return {
-    marginTop: 14,
-    border: "1px solid #e5e7eb",
-    borderRadius: 16,
-    padding: 14,
-    background: "#fff",
-  };
-}
-function panelTitle() {
-  return { fontSize: 16, fontWeight: 900, color: "#0f172a" };
-}
-function Pill({ ok, label }) {
-  return (
-    <div
-      style={{
-        padding: "8px 10px",
-        borderRadius: 999,
-        border: "1px solid #e5e7eb",
-        background: ok ? "rgba(16,185,129,0.12)" : "rgba(244,63,94,0.10)",
-        color: ok ? "#065f46" : "#9f1239",
-        fontWeight: 900,
-        fontSize: 13,
-      }}
-    >
-      {label}
-    </div>
-  );
-}
-function primaryBtn() {
-  return {
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid #111827",
-    background: "#111827",
-    color: "#fff",
-    fontWeight: 900,
-    cursor: "pointer",
-    fontSize: 13,
-    whiteSpace: "nowrap",
-  };
-}
-function dangerBtn() {
-  return {
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid #fecaca",
-    background: "#fff",
-    color: "#b91c1c",
-    fontWeight: 900,
-    cursor: "pointer",
-    fontSize: 13,
-    whiteSpace: "nowrap",
-  };
-}
-function secondaryLink() {
-  return {
-    padding: "10px 12px",
+    textDecoration: "none",
+    padding: "10px 14px",
     borderRadius: 12,
     border: "1px solid #d1d5db",
     background: "#fff",
     color: "#111827",
     fontWeight: 900,
+  };
+}
+
+function ghostLink() {
+  return {
     textDecoration: "none",
-    fontSize: 13,
-    whiteSpace: "nowrap",
+    fontWeight: 900,
+    color: "#1d4ed8",
+  };
+}
+
+function pre() {
+  return {
+    marginTop: 10,
+    background: "#0b1220",
+    color: "#e5e7eb",
+    borderRadius: 14,
+    padding: 14,
+    fontSize: 12,
+    overflowX: "auto",
+    lineHeight: 1.6,
   };
 }

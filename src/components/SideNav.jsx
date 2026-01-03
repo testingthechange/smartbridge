@@ -13,25 +13,20 @@ const linkStyle = ({ isActive }) => ({
 });
 
 function getActiveProjectIdFromPath(pathname) {
-  // /minisite/:projectId/... OR /projects/:projectId
+  // Only infer projectId from minisite routes
   const p = String(pathname || "");
-
-  const m1 = p.match(/^\/minisite\/([^/]+)\//);
-  if (m1?.[1]) return m1[1];
-
-  const m2 = p.match(/^\/projects\/([^/]+)$/);
-  if (m2?.[1]) return m2[1];
-
+  const m = p.match(/^\/minisite\/([^/]+)\//);
+  if (m?.[1]) return m[1];
   return null;
 }
 
 export default function SideNav() {
   const { pathname, search } = useLocation();
-
   const currentId = useMemo(() => getActiveProjectIdFromPath(pathname), [pathname]);
 
   // Preserve querystring between minisite pages (token, etc.)
   const qs = search || "?token=demo";
+  const minisiteId = currentId || "demo";
 
   return (
     <aside
@@ -49,16 +44,7 @@ export default function SideNav() {
         Producer
       </NavLink>
 
-      <NavLink to="/projects" style={linkStyle}>
-        Projects
-      </NavLink>
-
-      {/* Only show if we can infer a project id from URL */}
-      {currentId ? (
-        <NavLink to={`/projects/${currentId}`} style={linkStyle}>
-          Project ({currentId})
-        </NavLink>
-      ) : null}
+      {/* Projects + Project links removed for rollout stability */}
 
       <NavLink to="/admin" style={linkStyle}>
         Admin
@@ -69,26 +55,26 @@ export default function SideNav() {
       </NavLink>
 
       <div style={{ fontSize: 11, opacity: 0.6, margin: "16px 0 8px" }}>
-        MINI SITE ({currentId || "demo"})
+        MINI SITE ({minisiteId})
       </div>
 
-      <NavLink to={`/minisite/${currentId || "demo"}/catalog${qs}`} style={linkStyle}>
+      <NavLink to={`/minisite/${minisiteId}/catalog${qs}`} style={linkStyle}>
         Catalog
       </NavLink>
 
-      <NavLink to={`/minisite/${currentId || "demo"}/album${qs}`} style={linkStyle}>
+      <NavLink to={`/minisite/${minisiteId}/album${qs}`} style={linkStyle}>
         Album
       </NavLink>
 
-      <NavLink to={`/minisite/${currentId || "demo"}/nft-mix${qs}`} style={linkStyle}>
+      <NavLink to={`/minisite/${minisiteId}/nft-mix${qs}`} style={linkStyle}>
         NFT Mix
       </NavLink>
 
-      <NavLink to={`/minisite/${currentId || "demo"}/songs${qs}`} style={linkStyle}>
+      <NavLink to={`/minisite/${minisiteId}/songs${qs}`} style={linkStyle}>
         Songs
       </NavLink>
 
-      <NavLink to={`/minisite/${currentId || "demo"}/meta${qs}`} style={linkStyle}>
+      <NavLink to={`/minisite/${minisiteId}/meta${qs}`} style={linkStyle}>
         Meta
       </NavLink>
     </aside>

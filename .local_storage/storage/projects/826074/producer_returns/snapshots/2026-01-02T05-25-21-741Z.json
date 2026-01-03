@@ -1,0 +1,28 @@
+{
+  "projectId": "826074",
+  "savedAt": "2026-01-02T05:25:21.741Z",
+  "project": {
+    "catalog": {
+      "songs": [
+        {
+          "slot": 1,
+          "title": "Track 01",
+          "files": {
+            "album": {
+              "s3Key": "storage/projects/826074/audio/mp3/track01.mp3"
+            }
+          }
+        },
+        {
+          "slot": 2,
+          "title": "Track 02",
+          "files": {
+            "album": {
+              "s3Key": "storage/projects/826074/audio/mp3/track02.mp3"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
