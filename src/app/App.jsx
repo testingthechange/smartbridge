@@ -22,7 +22,7 @@ import Admin from "../pages/Admin.jsx";
 import Catalog from "../minisite/Catalog.jsx";
 import Album from "../minisite/Album.jsx";
 import Meta from "../minisite/Meta.jsx";
-import NftMix from "../minisite/NftMix.jsx";
+import NftMix from "../minisite/NFTMix.jsx"; // ✅ FIX: match actual filename casing
 import Songs from "../minisite/Songs.jsx";
 
 function AppShell() {
