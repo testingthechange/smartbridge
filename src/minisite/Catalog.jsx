@@ -27,6 +27,18 @@ function withTimeout(promise, ms, msg) {
   ]);
 }
 
+/** ✅ detect expired/invalid presigned URL */
+function isExpiredPresignError(err) {
+  const s = String(err?.message || err || "").toLowerCase();
+  return (
+    s.includes("403") ||
+    s.includes("forbidden") ||
+    s.includes("expired") ||
+    s.includes("signature") ||
+    s.includes("accessdenied")
+  );
+}
+
 function PlayingEq({ active }) {
   return (
     <span
@@ -72,10 +84,15 @@ export default function Catalog() {
     return (sp.get("projectId") || "").trim();
   }, [params, location.search]);
 
-  // ✅ backend source: env only (no fallback)
+  // ✅ Vite only exposes env vars that start with VITE_
+  const ENV_VITE_API_BASE = String(import.meta.env.VITE_API_BASE || "").trim();
+  const ENV_VITE_BACKEND_URL = String(import.meta.env.VITE_BACKEND_URL || "").trim();
+
+  // ✅ backend base: prefer VITE_API_BASE, fallback to older VITE_BACKEND_URL
   const API_BASE = useMemo(() => {
-    return String(import.meta.env.VITE_BACKEND_URL || "").replace(/\/+$/, "");
-  }, []);
+    const raw = ENV_VITE_API_BASE || ENV_VITE_BACKEND_URL || "";
+    return String(raw).replace(/\/+$/, "");
+  }, [ENV_VITE_API_BASE, ENV_VITE_BACKEND_URL]);
 
   const [project, setProject] = useState(() => loadProject(projectId));
 
@@ -210,12 +227,15 @@ export default function Catalog() {
     };
   }, [isSeeking]);
 
-  async function playTrack(slot, versionKey, forceRefresh = false) {
+  async function playTrack(slot, versionKey) {
     setErr("");
     const seq = ++playSeq.current;
 
     if (!API_BASE) {
-      setErr("Missing VITE_BACKEND_URL");
+      setErr(
+        `Missing backend env var. Set VITE_API_BASE (preferred) or VITE_BACKEND_URL.\n` +
+          `VITE_API_BASE="${ENV_VITE_API_BASE}"\nVITE_BACKEND_URL="${ENV_VITE_BACKEND_URL}"`
+      );
       return;
     }
 
@@ -228,19 +248,15 @@ export default function Catalog() {
     setBusy("Loading…");
 
     try {
-      let url = fileNow?.playbackUrl || "";
-      if (!url || forceRefresh) {
-        url = await fetchPlaybackUrl({
-          apiBase: API_BASE,
-          s3Key,
-        });
-        updateSong(slot, (s) => ({
-          files: {
-            ...(s.files || {}),
-            [versionKey]: { ...(s.files?.[versionKey] || {}), playbackUrl: url },
-          },
-        }));
-      }
+      // ✅ Always request a fresh presigned URL (they expire)
+      const url = await fetchPlaybackUrl({ apiBase: API_BASE, s3Key });
+
+      updateSong(slot, (s) => ({
+        files: {
+          ...(s.files || {}),
+          [versionKey]: { ...(s.files?.[versionKey] || {}), playbackUrl: url },
+        },
+      }));
 
       setBusy("");
 
@@ -251,24 +267,42 @@ export default function Catalog() {
 
       setActiveTrack({ slot, versionKey });
 
-      if (a.src !== url) {
-        try {
-          a.pause();
-        } catch {}
-        a.currentTime = 0;
-        setCurrentTime(0);
-        setDuration(0);
+      const setSrcAndPlay = async (u) => {
+        if (a.src !== u) {
+          try {
+            a.pause();
+          } catch {}
+          a.currentTime = 0;
+          setCurrentTime(0);
+          setDuration(0);
 
-        a.src = url;
-        a.load();
+          a.src = u;
+          a.load();
 
-        await Promise.race([once(a, "canplay"), once(a, "loadedmetadata")]);
-        if (seq !== playSeq.current) return;
-      }
+          await Promise.race([once(a, "canplay"), once(a, "loadedmetadata")]);
+          if (seq !== playSeq.current) return;
+        }
+
+        await a.play();
+      };
 
       try {
-        await a.play();
-      } catch {}
+        await setSrcAndPlay(url);
+      } catch (e) {
+        // ✅ If it 403s (expired), refresh once and retry
+        if (isExpiredPresignError(e)) {
+          const fresh = await fetchPlaybackUrl({ apiBase: API_BASE, s3Key });
+          updateSong(slot, (s) => ({
+            files: {
+              ...(s.files || {}),
+              [versionKey]: { ...(s.files?.[versionKey] || {}), playbackUrl: fresh },
+            },
+          }));
+          await setSrcAndPlay(fresh);
+        } else {
+          throw e;
+        }
+      }
     } catch (e) {
       setBusy("");
       setErr(e?.message || "Playback failed");
@@ -289,14 +323,17 @@ export default function Catalog() {
     }
   }
 
-  /* ---------- upload (FIXED + timeout) ---------- */
+  /* ---------- upload ---------- */
 
   async function onUpload(slot, versionKey, file) {
     if (!file) return;
     setErr("");
 
     if (!API_BASE) {
-      setErr("Missing VITE_BACKEND_URL");
+      setErr(
+        `Missing backend env var. Set VITE_API_BASE (preferred) or VITE_BACKEND_URL.\n` +
+          `VITE_API_BASE="${ENV_VITE_API_BASE}"\nVITE_BACKEND_URL="${ENV_VITE_BACKEND_URL}"`
+      );
       return;
     }
 
@@ -376,7 +413,10 @@ export default function Catalog() {
     setErr("");
 
     if (!API_BASE) {
-      setErr("Missing VITE_BACKEND_URL");
+      setErr(
+        `Missing backend env var. Set VITE_API_BASE (preferred) or VITE_BACKEND_URL.\n` +
+          `VITE_API_BASE="${ENV_VITE_API_BASE}"\nVITE_BACKEND_URL="${ENV_VITE_BACKEND_URL}"`
+      );
       return;
     }
 
@@ -389,10 +429,8 @@ export default function Catalog() {
     setBusy("Master Saving…");
 
     try {
-      // ✅ NEW: before snapshot, normalize titles so snapshot cannot “forget” them
       const stamp = new Date().toISOString();
 
-      // 1) force titleJson to match title for every slot
       const normalizedSongs = (Array.isArray(project?.catalog?.songs) ? project.catalog.songs : []).map((s) => {
         const slot = Number(s?.slot || 0) || 0;
         const title = String(s?.title || "").trim();
@@ -404,8 +442,6 @@ export default function Catalog() {
         };
       });
 
-      // 2) mirror Catalog titles into Album titles (so Album + Publish always has titles)
-      //    NOTE: Album page expects 1..16; Catalog is 1..9. We still write what we have.
       const albumSongTitles = normalizedSongs
         .filter((s) => Number(s.slot) > 0)
         .map((s) => ({ slot: Number(s.slot), title: String(s.title || "") }));
@@ -427,7 +463,6 @@ export default function Catalog() {
         },
       };
 
-      // ✅ build snapshot from the normalized/stamped project
       const snapshot = buildSnapshot({ projectId, project: projectForSnapshot });
       const projectForBackend = projectForBackendFromSnapshot(snapshot);
 
@@ -486,17 +521,25 @@ export default function Catalog() {
       >
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
           <div>
-            <div style={{ fontSize: 44, fontWeight: 900, lineHeight: 1 }}>
-              Catalog
-            </div>
+            <div style={{ fontSize: 44, fontWeight: 900, lineHeight: 1 }}>Catalog</div>
             <div style={{ fontSize: 16, opacity: 0.8, marginTop: 6 }}>
               Project: <b style={{ fontFamily: "monospace" }}>{projectId}</b>
             </div>
           </div>
 
-          <div style={{ fontSize: 12, opacity: 0.6 }}>
-            Backend:{" "}
-            <span style={{ fontFamily: "monospace" }}>{API_BASE}</span>
+          {/* ✅ show exactly what Vite injected */}
+          <div style={{ fontSize: 12, opacity: 0.65, textAlign: "right" }}>
+            <div>
+              API_BASE: <span style={{ fontFamily: "monospace" }}>{API_BASE || "—"}</span>
+            </div>
+            <div>
+              VITE_API_BASE:{" "}
+              <span style={{ fontFamily: "monospace" }}>{ENV_VITE_API_BASE || "—"}</span>
+            </div>
+            <div>
+              VITE_BACKEND_URL:{" "}
+              <span style={{ fontFamily: "monospace" }}>{ENV_VITE_BACKEND_URL || "—"}</span>
+            </div>
           </div>
         </div>
 
@@ -512,9 +555,7 @@ export default function Catalog() {
           <div style={{ fontWeight: 900, fontSize: 22 }}>Player</div>
 
           <div style={{ fontSize: 12, marginTop: 6, opacity: 0.8 }}>
-            {activeTrack
-              ? `Now Playing: ${activeTrack.slot}:${activeTrack.versionKey}`
-              : "Now Playing: —"}
+            {activeTrack ? `Now Playing: ${activeTrack.slot}:${activeTrack.versionKey}` : "Now Playing: —"}
           </div>
 
           <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -600,15 +641,9 @@ export default function Catalog() {
           }}
         >
           <div style={{ padding: 12, fontWeight: 950 }}>Song</div>
-          <div style={{ padding: 12, fontWeight: 950, borderLeft: "1px solid #e5e7eb" }}>
-            Album
-          </div>
-          <div style={{ padding: 12, fontWeight: 950, borderLeft: "1px solid #e5e7eb" }}>
-            A
-          </div>
-          <div style={{ padding: 12, fontWeight: 950, borderLeft: "1px solid #e5e7eb" }}>
-            B
-          </div>
+          <div style={{ padding: 12, fontWeight: 950, borderLeft: "1px solid #e5e7eb" }}>Album</div>
+          <div style={{ padding: 12, fontWeight: 950, borderLeft: "1px solid #e5e7eb" }}>A</div>
+          <div style={{ padding: 12, fontWeight: 950, borderLeft: "1px solid #e5e7eb" }}>B</div>
         </div>
 
         {songs.map((s, idx) => (
@@ -644,17 +679,13 @@ export default function Catalog() {
 
             {VERSION_KEYS.map((v) => {
               const f = s.files?.[v.key] || { fileName: "", s3Key: "", playbackUrl: "" };
-              const playing =
-                sameTrack({ slot: s.slot, versionKey: v.key }, activeTrack) && isPlaying;
+              const playing = sameTrack({ slot: s.slot, versionKey: v.key }, activeTrack) && isPlaying;
 
               const rowLoad = loadingKey === `${s.slot}:${v.key}`;
               const upLoad = loadingKey === `${s.slot}:${v.key}:upload`;
 
               return (
-                <div
-                  key={v.key}
-                  style={{ padding: 12, borderLeft: "1px solid #e5e7eb" }}
-                >
+                <div key={v.key} style={{ padding: 12, borderLeft: "1px solid #e5e7eb" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <PlayingEq active={playing} />
@@ -663,9 +694,7 @@ export default function Catalog() {
 
                     <button
                       type="button"
-                      onClick={() =>
-                        document.getElementById(`u-${s.slot}-${v.key}`)?.click()
-                      }
+                      onClick={() => document.getElementById(`u-${s.slot}-${v.key}`)?.click()}
                       disabled={upLoad}
                       style={{
                         padding: "8px 10px",
@@ -766,9 +795,7 @@ export default function Catalog() {
         {masterSaveLastAt ? (
           <div style={{ marginTop: 10, fontSize: 11, opacity: 0.6 }}>
             Last Master Save:{" "}
-            <span style={{ fontFamily: "monospace", fontWeight: 800 }}>
-              {masterSaveLastAt}
-            </span>
+            <span style={{ fontFamily: "monospace", fontWeight: 800 }}>{masterSaveLastAt}</span>
           </div>
         ) : null}
       </div>
