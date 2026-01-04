@@ -84,15 +84,12 @@ export default function Catalog() {
     return (sp.get("projectId") || "").trim();
   }, [params, location.search]);
 
-  // ✅ Vite only exposes env vars that start with VITE_
-  const ENV_VITE_API_BASE = String(import.meta.env.VITE_API_BASE || "").trim();
-  const ENV_VITE_BACKEND_URL = String(import.meta.env.VITE_BACKEND_URL || "").trim();
-
-  // ✅ backend base: prefer VITE_API_BASE, fallback to older VITE_BACKEND_URL
+  // ✅ CLEAN: single source of truth, no fallback
   const API_BASE = useMemo(() => {
-    const raw = ENV_VITE_API_BASE || ENV_VITE_BACKEND_URL || "";
-    return String(raw).replace(/\/+$/, "");
-  }, [ENV_VITE_API_BASE, ENV_VITE_BACKEND_URL]);
+    return String(import.meta.env.VITE_API_BASE || "")
+      .trim()
+      .replace(/\/+$/, "");
+  }, []);
 
   const [project, setProject] = useState(() => loadProject(projectId));
 
@@ -233,8 +230,8 @@ export default function Catalog() {
 
     if (!API_BASE) {
       setErr(
-        `Missing backend env var. Set VITE_API_BASE (preferred) or VITE_BACKEND_URL.\n` +
-          `VITE_API_BASE="${ENV_VITE_API_BASE}"\nVITE_BACKEND_URL="${ENV_VITE_BACKEND_URL}"`
+        "Missing VITE_API_BASE. Set it on the Render Static Site and redeploy.\n" +
+          "Example: VITE_API_BASE=https://album-backend-kmuo.onrender.com"
       );
       return;
     }
@@ -331,8 +328,8 @@ export default function Catalog() {
 
     if (!API_BASE) {
       setErr(
-        `Missing backend env var. Set VITE_API_BASE (preferred) or VITE_BACKEND_URL.\n` +
-          `VITE_API_BASE="${ENV_VITE_API_BASE}"\nVITE_BACKEND_URL="${ENV_VITE_BACKEND_URL}"`
+        "Missing VITE_API_BASE. Set it on the Render Static Site and redeploy.\n" +
+          "Example: VITE_API_BASE=https://album-backend-kmuo.onrender.com"
       );
       return;
     }
@@ -414,8 +411,8 @@ export default function Catalog() {
 
     if (!API_BASE) {
       setErr(
-        `Missing backend env var. Set VITE_API_BASE (preferred) or VITE_BACKEND_URL.\n` +
-          `VITE_API_BASE="${ENV_VITE_API_BASE}"\nVITE_BACKEND_URL="${ENV_VITE_BACKEND_URL}"`
+        "Missing VITE_API_BASE. Set it on the Render Static Site and redeploy.\n" +
+          "Example: VITE_API_BASE=https://album-backend-kmuo.onrender.com"
       );
       return;
     }
@@ -527,19 +524,8 @@ export default function Catalog() {
             </div>
           </div>
 
-          {/* ✅ show exactly what Vite injected */}
-          <div style={{ fontSize: 12, opacity: 0.65, textAlign: "right" }}>
-            <div>
-              API_BASE: <span style={{ fontFamily: "monospace" }}>{API_BASE || "—"}</span>
-            </div>
-            <div>
-              VITE_API_BASE:{" "}
-              <span style={{ fontFamily: "monospace" }}>{ENV_VITE_API_BASE || "—"}</span>
-            </div>
-            <div>
-              VITE_BACKEND_URL:{" "}
-              <span style={{ fontFamily: "monospace" }}>{ENV_VITE_BACKEND_URL || "—"}</span>
-            </div>
+          <div style={{ fontSize: 12, opacity: 0.6 }}>
+            Backend: <span style={{ fontFamily: "monospace" }}>{API_BASE || "—"}</span>
           </div>
         </div>
 
