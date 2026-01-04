@@ -10,6 +10,9 @@ import {
   once,
   fetchPlaybackUrl,
   ensureSongTitleJson,
+  buildSnapshot,
+  projectForBackendFromSnapshot,
+  postMasterSave,
 } from "./catalog/catalogCore.js";
 
 function withTimeout(promise, ms, msg) {
@@ -35,13 +38,23 @@ function isExpiredPresignError(err) {
 }
 
 /**
+ * Title rule:
+ * - Prefer catalog.titleJson.title if present
+ * - Else catalog.title
+ * Album rows store the resolved title.
+ */
+function pickCatalogTitle(s, slot) {
+  const tj = s?.titleJson;
+  const fromJson = typeof tj === "object" ? String(tj?.title || "").trim() : "";
+  const fromTitle = String(s?.title || "").trim();
+  return fromJson || fromTitle || `Song ${slot}`;
+}
+
+/**
  * Build the ALBUM playlist from Catalog (album-version only).
- * Rules:
- * - default album length = 8
- * - if catalog has more slots, extend
- * - include title from catalog slot
- * - include s3Key only from catalog.files.album.s3Key (never A/B)
- * - store as project.album.songs with trackNo + sourceSlot + file.s3Key
+ * - default length = 8
+ * - extend if catalog has more slots
+ * - only uses catalog.files.album.s3Key (never A/B)
  */
 function buildAlbumPlaylistFromCatalog(project) {
   const catalogSongs = Array.isArray(project?.catalog?.songs) ? project.catalog.songs : [];
@@ -50,7 +63,7 @@ function buildAlbumPlaylistFromCatalog(project) {
       Number(s?.slot || 0),
       {
         slot: Number(s?.slot || 0),
-        title: String(s?.title || "").trim(),
+        title: pickCatalogTitle(s, Number(s?.slot || 0)),
         s3Key: String(s?.files?.album?.s3Key || "").trim(), // ALBUM ONLY
       },
     ])
@@ -96,6 +109,10 @@ export default function Album() {
   const metaComplete = Boolean(project?.album?.locks?.metaComplete);
   const coverComplete = Boolean(project?.album?.locks?.coverComplete);
 
+  // master save UI
+  const [masterSaveLastAt, setMasterSaveLastAt] = useState("");
+  const [masterSaveSnapshotKey, setMasterSaveSnapshotKey] = useState("");
+
   // audio / player state
   const audioRef = useRef(null);
   const playSeq = useRef(0);
@@ -123,7 +140,17 @@ export default function Album() {
         nftMix: {},
         songs: {},
         meta: {},
+        masterSave: {
+          lastMasterSaveAt: "",
+          sections: {},
+        },
       };
+
+    base.masterSave = {
+      ...(base.masterSave || {}),
+      lastMasterSaveAt: String(base.masterSave?.lastMasterSaveAt || ""),
+      sections: { ...(base.masterSave?.sections || {}) },
+    };
 
     base.album = {
       ...(base.album || {}),
@@ -146,16 +173,16 @@ export default function Album() {
       songs: Array.isArray(base.album?.songs) ? base.album.songs : [],
     };
 
-    // If album.songs missing, build a full-length (default 8) playlist from catalog.
+    // If album.songs missing, build from catalog.
     if (!base.album.songs.length) {
       base.album.songs = buildAlbumPlaylistFromCatalog(base);
     } else {
-      // Keep existing order, but refresh titles/s3Keys from current catalog for each sourceSlot.
+      // Refresh titles + album s3Keys from catalog for each sourceSlot (keep order).
       const refreshed = refreshAlbumFromCatalog(base, base.album.songs);
       base.album.songs = normalizeTrackNos(refreshed);
     }
 
-    // Mirror order to nftMix for later (universal logic, but no UI there yet)
+    // Mirror order to nftMix for later
     base.nftMix = {
       ...(base.nftMix || {}),
       albumOrder: base.album.songs.map((t) => ({
@@ -168,6 +195,9 @@ export default function Album() {
 
     saveProject(projectId, base);
     setProject(base);
+
+    // surface last master save in UI if present
+    setMasterSaveLastAt(String(base.masterSave?.lastMasterSaveAt || ""));
   }, [projectId]);
 
   function refreshAlbumFromCatalog(proj, albumSongs) {
@@ -176,28 +206,45 @@ export default function Album() {
       catalogSongs.map((s) => [
         Number(s?.slot || 0),
         {
-          title: String(s?.title || "").trim(),
+          title: pickCatalogTitle(s, Number(s?.slot || 0)),
           s3Key: String(s?.files?.album?.s3Key || "").trim(), // ALBUM ONLY
         },
       ])
     );
 
     const maxSlot = Math.max(8, catalogSongs.length || 0, 8);
-    const existingBySourceSlot = new Map(
-      (Array.isArray(albumSongs) ? albumSongs : []).map((t) => [Number(t?.sourceSlot || 0), t])
-    );
 
+    const existingOrder = Array.isArray(albumSongs) ? albumSongs : [];
+    const orderedSlots = existingOrder
+      .map((t) => Number(t?.sourceSlot || 0))
+      .filter((n) => n > 0);
+
+    const used = new Set(orderedSlots);
     const out = [];
-    for (let slot = 1; slot <= maxSlot; slot++) {
+
+    // keep the existing order first (but refresh title + s3Key)
+    for (const slot of orderedSlots) {
       const cat = bySlot.get(slot) || { title: `Song ${slot}`, s3Key: "" };
-      const prev = existingBySourceSlot.get(slot);
       out.push({
         trackNo: out.length + 1,
         sourceSlot: slot,
-        title: String(prev?.title || cat.title || `Song ${slot}`),
+        title: cat.title || `Song ${slot}`,
         file: { s3Key: String(cat.s3Key || "") },
       });
     }
+
+    // then append any missing slots up to maxSlot
+    for (let slot = 1; slot <= maxSlot; slot++) {
+      if (used.has(slot)) continue;
+      const cat = bySlot.get(slot) || { title: `Song ${slot}`, s3Key: "" };
+      out.push({
+        trackNo: out.length + 1,
+        sourceSlot: slot,
+        title: cat.title || `Song ${slot}`,
+        file: { s3Key: String(cat.s3Key || "") },
+      });
+    }
+
     return out;
   }
 
@@ -226,6 +273,7 @@ export default function Album() {
   function setAlbumSongs(nextSongs) {
     updateProject((prev) => {
       const normalized = normalizeTrackNos(nextSongs);
+
       return {
         ...prev,
         album: { ...(prev.album || {}), songs: normalized },
@@ -242,14 +290,27 @@ export default function Album() {
     });
   }
 
-  // ---------- audio events ----------
+  // ---------- audio events (including continuous play) ----------
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
 
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
-    const onEnded = () => setIsPlaying(false);
+
+    const onEnded = () => {
+      setIsPlaying(false);
+
+      // continuous play: next track if available
+      const list = Array.isArray(project?.album?.songs) ? project.album.songs : [];
+      const nextIdx = activeIndex >= 0 ? activeIndex + 1 : 0;
+      if (nextIdx < list.length) {
+        const nextKey = String(list?.[nextIdx]?.file?.s3Key || "").trim();
+        if (nextKey) {
+          playAlbumIndex(nextIdx);
+        }
+      }
+    };
 
     const onLoaded = () => setDuration(Number.isFinite(a.duration) ? a.duration : 0);
     const onTime = () => {
@@ -269,7 +330,8 @@ export default function Album() {
       a.removeEventListener("loadedmetadata", onLoaded);
       a.removeEventListener("timeupdate", onTime);
     };
-  }, [isSeeking]);
+    // project/activeIndex need to be in scope for onEnded
+  }, [isSeeking, project, activeIndex]);
 
   async function playAlbumIndex(idx) {
     setErr("");
@@ -378,8 +440,7 @@ export default function Album() {
     const [moved] = nextList.splice(from, 1);
     nextList.splice(idx, 0, moved);
 
-    // Keep active track index roughly consistent:
-    // If active item moved, update activeIndex to new position.
+    // Keep active track index consistent
     const active = activeIndex;
     let nextActive = active;
     if (active === from) nextActive = idx;
@@ -420,7 +481,6 @@ export default function Album() {
       fd.append("file", file);
       fd.append("projectId", projectId);
 
-      // query projectId for guaranteed backend resolution
       const res = await withTimeout(
         fetch(`${API_BASE}/api/upload-to-s3?projectId=${encodeURIComponent(projectId)}`, {
           method: "POST",
@@ -468,17 +528,19 @@ export default function Album() {
     }
   }
 
-  // ---------- small helpers ----------
+  // ---------- refresh titles/s3keys from Catalog ----------
   function refreshFromCatalogNow() {
     updateProject((prev) => {
       const list = Array.isArray(prev?.album?.songs) ? prev.album.songs : [];
       const refreshed = refreshAlbumFromCatalog(prev, list);
+      const normalized = normalizeTrackNos(refreshed);
+
       return {
         ...prev,
-        album: { ...(prev.album || {}), songs: normalizeTrackNos(refreshed) },
+        album: { ...(prev.album || {}), songs: normalized },
         nftMix: {
           ...(prev.nftMix || {}),
-          albumOrder: normalizeTrackNos(refreshed).map((t) => ({
+          albumOrder: normalized.map((t) => ({
             trackNo: t.trackNo,
             sourceSlot: t.sourceSlot,
             title: t.title,
@@ -487,6 +549,110 @@ export default function Album() {
         },
       };
     });
+  }
+
+  // ---------- MASTER SAVE (Album page) ----------
+  async function masterSave() {
+    setErr("");
+
+    if (!API_BASE) {
+      setErr("Missing VITE_API_BASE. Set it on Render Static Site and redeploy.");
+      return;
+    }
+
+    const ok1 = window.confirm("Are you sure you're ready to save?");
+    if (!ok1) return;
+
+    const ok2 = window.confirm("Ok last chance, check your work! Final step!");
+    if (!ok2) return;
+
+    setBusy("Master Saving…");
+
+    try {
+      const stamp = new Date().toISOString();
+
+      // normalize catalog titles -> titleJson
+      const catalogSongs = Array.isArray(project?.catalog?.songs) ? project.catalog.songs : [];
+      const normalizedCatalogSongs = catalogSongs.map((s) => {
+        const slot = Number(s?.slot || 0) || 0;
+        const title = pickCatalogTitle(s, slot);
+        return {
+          ...s,
+          slot,
+          title,
+          titleJson: ensureSongTitleJson(slot, title),
+        };
+      });
+
+      // refresh album playlist titles/s3Keys from the normalized catalog (keep order)
+      const projectForRefresh = {
+        ...(project || {}),
+        catalog: { ...(project?.catalog || {}), songs: normalizedCatalogSongs },
+      };
+
+      const currentAlbumSongs = Array.isArray(project?.album?.songs) ? project.album.songs : [];
+      const refreshedAlbumSongs = normalizeTrackNos(refreshAlbumFromCatalog(projectForRefresh, currentAlbumSongs));
+
+      // album songTitles mirror (optional, but useful)
+      const albumSongTitles = refreshedAlbumSongs.map((t) => ({
+        slot: Number(t.trackNo),
+        title: String(t.title || ""),
+      }));
+
+      const projectForSnapshot = {
+        ...(projectForRefresh || {}),
+        album: {
+          ...(project?.album || {}),
+          songs: refreshedAlbumSongs,
+          songTitles: albumSongTitles,
+        },
+        masterSave: {
+          ...(project?.masterSave || {}),
+          lastMasterSaveAt: stamp,
+          sections: {
+            ...(project?.masterSave?.sections || {}),
+            album: { complete: true, masterSavedAt: stamp },
+          },
+        },
+        nftMix: {
+          ...(project?.nftMix || {}),
+          albumOrder: refreshedAlbumSongs.map((t) => ({
+            trackNo: t.trackNo,
+            sourceSlot: t.sourceSlot,
+            title: t.title,
+            s3Key: String(t?.file?.s3Key || ""),
+          })),
+        },
+      };
+
+      const snapshot = buildSnapshot({ projectId, project: projectForSnapshot });
+      const projectForBackend = projectForBackendFromSnapshot(snapshot);
+
+      const out = await postMasterSave({
+        apiBase: API_BASE,
+        projectId,
+        projectForBackend,
+      });
+
+      setMasterSaveLastAt(stamp);
+      setMasterSaveSnapshotKey(out?.snapshotKey || "");
+
+      // persist the normalized state locally too
+      updateProject((prev) => {
+        const next = { ...prev };
+        next.catalog = projectForSnapshot.catalog;
+        next.album = projectForSnapshot.album;
+        next.nftMix = projectForSnapshot.nftMix;
+        next.masterSave = projectForSnapshot.masterSave;
+        return next;
+      });
+
+      window.alert("Master Save complete.");
+    } catch (e) {
+      setErr(typeof e?.message === "string" ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
   }
 
   // ---------- render ----------
@@ -599,9 +765,7 @@ export default function Album() {
                 Refresh from Catalog
               </button>
 
-              <div style={{ fontSize: 12, opacity: 0.7 }}>
-                This order will be mirrored to NFT Mix later.
-              </div>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>This order will be mirrored to NFT Mix later.</div>
             </div>
           </div>
 
@@ -619,7 +783,7 @@ export default function Album() {
 
                   return (
                     <div
-                      key={`album-row-${t.sourceSlot}`}
+                      key={`album-row-${t.sourceSlot}-${idx}`}
                       draggable
                       onDragStart={() => onDragStart(idx)}
                       onDragOver={(e) => e.preventDefault()}
@@ -680,7 +844,7 @@ export default function Album() {
           <div style={{ padding: 12, borderBottom: "1px solid #eef2f7" }}>
             <div style={{ fontSize: 18, fontWeight: 950 }}>Album Player</div>
             <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
-              No side menu. Uses backend presigned URLs.
+              Plays continuously through the playlist. No side menu. Uses backend presigned URLs.
             </div>
           </div>
 
@@ -944,13 +1108,60 @@ export default function Album() {
         </div>
       </div>
 
+      {/* Master Save (Album page) */}
+      <div style={{ marginTop: 16 }}>
+        {masterSaveSnapshotKey ? (
+          <div
+            style={{
+              marginBottom: 10,
+              padding: 10,
+              borderRadius: 12,
+              border: "1px solid rgba(16,185,129,0.35)",
+              background: "rgba(16,185,129,0.10)",
+              color: "#065f46",
+              fontWeight: 900,
+            }}
+          >
+            ✅ SnapshotKey:{" "}
+            <span style={{ fontFamily: "monospace" }}>{masterSaveSnapshotKey}</span>
+          </div>
+        ) : null}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+          <button
+            type="button"
+            onClick={masterSave}
+            style={{
+              padding: "12px 14px",
+              borderRadius: 12,
+              border: "1px solid #111827",
+              background: "#111827",
+              color: "#fff",
+              fontWeight: 950,
+              cursor: "pointer",
+            }}
+          >
+            Master Save
+          </button>
+        </div>
+
+        {masterSaveLastAt ? (
+          <div style={{ marginTop: 10, fontSize: 11, opacity: 0.6 }}>
+            Last Master Save:{" "}
+            <span style={{ fontFamily: "monospace", fontWeight: 800 }}>
+              {masterSaveLastAt}
+            </span>
+          </div>
+        ) : null}
+      </div>
+
       {/* Pipeline note */}
       <div style={{ marginTop: 14, border: "1px solid #e5e7eb", borderRadius: 12, background: "#fff" }}>
         <div style={{ padding: 12 }}>
           <div style={{ fontWeight: 950 }}>Pipeline</div>
           <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
             Album page writes <span style={{ fontFamily: "monospace" }}>project.album.songs</span> (album-only order),
-            meta, and cover. Master Save later snapshots everything to S3 and drives Export green checks, then Publish.
+            meta, and cover. Master Save snapshots everything to S3 and drives Export green checks, then Publish.
           </div>
         </div>
       </div>
