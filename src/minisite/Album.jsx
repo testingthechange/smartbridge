@@ -5,14 +5,13 @@ import { useLocation, useParams } from "react-router-dom";
 import {
   loadProject,
   saveProject,
-  ensureSongTitleJson,
   clamp,
   fmtTime,
   once,
   fetchPlaybackUrl,
+  ensureSongTitleJson,
 } from "./catalog/catalogCore.js";
 
-/** best-effort timeout wrapper */
 function withTimeout(promise, ms, msg) {
   return Promise.race([
     promise,
@@ -20,7 +19,10 @@ function withTimeout(promise, ms, msg) {
   ]);
 }
 
-/** expired/invalid presigned URL signals */
+function normalizeBase(s) {
+  return String(s || "").trim().replace(/\/+$/, "");
+}
+
 function isExpiredPresignError(err) {
   const s = String(err?.message || err || "").toLowerCase();
   return (
@@ -32,56 +34,44 @@ function isExpiredPresignError(err) {
   );
 }
 
-/** normalize backend base */
-function normalizeBase(s) {
-  return String(s || "").trim().replace(/\/+$/, "");
-}
-
-/** Build available tracks from Catalog (album files only). Default 8, extend if more exist. */
-function deriveAvailableFromCatalog(project) {
+/**
+ * Build the ALBUM playlist from Catalog (album-version only).
+ * Rules:
+ * - default album length = 8
+ * - if catalog has more slots, extend
+ * - include title from catalog slot
+ * - include s3Key only from catalog.files.album.s3Key (never A/B)
+ * - store as project.album.songs with trackNo + sourceSlot + file.s3Key
+ */
+function buildAlbumPlaylistFromCatalog(project) {
   const catalogSongs = Array.isArray(project?.catalog?.songs) ? project.catalog.songs : [];
-  const available = catalogSongs
-    .map((s) => {
-      const sourceSlot = Number(s?.slot || 0);
-      const title = String(s?.title || "").trim();
-      const s3Key = String(s?.files?.album?.s3Key || "").trim(); // album-version only
-      return {
-        sourceSlot,
-        title,
-        s3Key,
-      };
-    })
-    .filter((x) => x.sourceSlot > 0);
+  const bySlot = new Map(
+    catalogSongs.map((s) => [
+      Number(s?.slot || 0),
+      {
+        slot: Number(s?.slot || 0),
+        title: String(s?.title || "").trim(),
+        s3Key: String(s?.files?.album?.s3Key || "").trim(), // ALBUM ONLY
+      },
+    ])
+  );
 
-  // Default = first 8 slots in order; if catalog has more, include them
-  const maxCount = Math.max(8, available.length);
-  const bySlot = new Map(available.map((a) => [Number(a.sourceSlot), a]));
-
-  const out = [];
-  for (let i = 1; i <= maxCount; i++) {
-    const a = bySlot.get(i) || { sourceSlot: i, title: `Song ${i}`, s3Key: "" };
-    out.push(a);
+  const maxSlot = Math.max(8, catalogSongs.length || 0, 8);
+  const list = [];
+  for (let slot = 1; slot <= maxSlot; slot++) {
+    const c = bySlot.get(slot) || { slot, title: `Song ${slot}`, s3Key: "" };
+    list.push({
+      trackNo: list.length + 1,
+      sourceSlot: slot,
+      title: c.title || `Song ${slot}`,
+      file: { s3Key: c.s3Key || "" },
+    });
   }
-
-  return out;
+  return list;
 }
 
-/** Ensure album order exists; if missing, build from available (only those with s3Key) */
-function ensureAlbumOrder(project) {
-  const existing = Array.isArray(project?.album?.songs) ? project.album.songs : [];
-  if (existing.length) return existing;
-
-  const available = deriveAvailableFromCatalog(project);
-  const seeded = available
-    .filter((a) => a.s3Key)
-    .map((a, idx) => ({
-      trackNo: idx + 1,
-      sourceSlot: a.sourceSlot,
-      title: a.title || `Track ${idx + 1}`,
-      file: { s3Key: a.s3Key },
-    }));
-
-  return seeded;
+function normalizeTrackNos(songs) {
+  return (Array.isArray(songs) ? songs : []).map((t, i) => ({ ...t, trackNo: i + 1 }));
 }
 
 export default function Album() {
@@ -98,7 +88,6 @@ export default function Album() {
   const API_BASE = useMemo(() => normalizeBase(import.meta.env.VITE_API_BASE), []);
 
   const [project, setProject] = useState(() => (projectId ? loadProject(projectId) : null));
-
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
 
@@ -107,15 +96,11 @@ export default function Album() {
   const metaComplete = Boolean(project?.album?.locks?.metaComplete);
   const coverComplete = Boolean(project?.album?.locks?.coverComplete);
 
-  // derived lists
-  const available = useMemo(() => deriveAvailableFromCatalog(project || {}), [project]);
-  const albumOrder = useMemo(() => ensureAlbumOrder(project || {}), [project]);
-
-  // player
+  // audio / player state
   const audioRef = useRef(null);
   const playSeq = useRef(0);
 
-  const [activeIndex, setActiveIndex] = useState(-1); // index into albumOrder
+  const [activeIndex, setActiveIndex] = useState(-1); // index into album list
   const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -124,8 +109,10 @@ export default function Album() {
   // drag state
   const dragIndexRef = useRef(null);
 
+  // init / ensure album structure
   useEffect(() => {
     if (!projectId) return;
+
     const base =
       loadProject(projectId) || {
         projectId,
@@ -138,7 +125,6 @@ export default function Album() {
         meta: {},
       };
 
-    // Ensure album container
     base.album = {
       ...(base.album || {}),
       locks: {
@@ -160,14 +146,60 @@ export default function Album() {
       songs: Array.isArray(base.album?.songs) ? base.album.songs : [],
     };
 
-    // Seed album.songs if missing, based on catalog album-version uploads
+    // If album.songs missing, build a full-length (default 8) playlist from catalog.
     if (!base.album.songs.length) {
-      base.album.songs = ensureAlbumOrder(base);
+      base.album.songs = buildAlbumPlaylistFromCatalog(base);
+    } else {
+      // Keep existing order, but refresh titles/s3Keys from current catalog for each sourceSlot.
+      const refreshed = refreshAlbumFromCatalog(base, base.album.songs);
+      base.album.songs = normalizeTrackNos(refreshed);
     }
+
+    // Mirror order to nftMix for later (universal logic, but no UI there yet)
+    base.nftMix = {
+      ...(base.nftMix || {}),
+      albumOrder: base.album.songs.map((t) => ({
+        trackNo: t.trackNo,
+        sourceSlot: t.sourceSlot,
+        title: t.title,
+        s3Key: String(t?.file?.s3Key || ""),
+      })),
+    };
 
     saveProject(projectId, base);
     setProject(base);
   }, [projectId]);
+
+  function refreshAlbumFromCatalog(proj, albumSongs) {
+    const catalogSongs = Array.isArray(proj?.catalog?.songs) ? proj.catalog.songs : [];
+    const bySlot = new Map(
+      catalogSongs.map((s) => [
+        Number(s?.slot || 0),
+        {
+          title: String(s?.title || "").trim(),
+          s3Key: String(s?.files?.album?.s3Key || "").trim(), // ALBUM ONLY
+        },
+      ])
+    );
+
+    const maxSlot = Math.max(8, catalogSongs.length || 0, 8);
+    const existingBySourceSlot = new Map(
+      (Array.isArray(albumSongs) ? albumSongs : []).map((t) => [Number(t?.sourceSlot || 0), t])
+    );
+
+    const out = [];
+    for (let slot = 1; slot <= maxSlot; slot++) {
+      const cat = bySlot.get(slot) || { title: `Song ${slot}`, s3Key: "" };
+      const prev = existingBySourceSlot.get(slot);
+      out.push({
+        trackNo: out.length + 1,
+        sourceSlot: slot,
+        title: String(prev?.title || cat.title || `Song ${slot}`),
+        file: { s3Key: String(cat.s3Key || "") },
+      });
+    }
+    return out;
+  }
 
   function updateProject(fn) {
     setProject((prev) => {
@@ -191,6 +223,25 @@ export default function Album() {
     }));
   }
 
+  function setAlbumSongs(nextSongs) {
+    updateProject((prev) => {
+      const normalized = normalizeTrackNos(nextSongs);
+      return {
+        ...prev,
+        album: { ...(prev.album || {}), songs: normalized },
+        nftMix: {
+          ...(prev.nftMix || {}),
+          albumOrder: normalized.map((t) => ({
+            trackNo: t.trackNo,
+            sourceSlot: t.sourceSlot,
+            title: t.title,
+            s3Key: String(t?.file?.s3Key || ""),
+          })),
+        },
+      };
+    });
+  }
+
   // ---------- audio events ----------
   useEffect(() => {
     const a = audioRef.current;
@@ -199,6 +250,7 @@ export default function Album() {
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
     const onEnded = () => setIsPlaying(false);
+
     const onLoaded = () => setDuration(Number.isFinite(a.duration) ? a.duration : 0);
     const onTime = () => {
       if (!isSeeking) setCurrentTime(a.currentTime || 0);
@@ -224,7 +276,7 @@ export default function Album() {
     const seq = ++playSeq.current;
 
     if (!API_BASE) {
-      setErr("Missing VITE_API_BASE. Set it on the Render Static Site and redeploy.");
+      setErr("Missing VITE_API_BASE. Set it on Render Static Site and redeploy.");
       return;
     }
 
@@ -283,7 +335,7 @@ export default function Album() {
     }
   }
 
-  function togglePlay(idx) {
+  function toggleRowPlay(idx) {
     const a = audioRef.current;
     if (!a) return;
 
@@ -309,140 +361,7 @@ export default function Album() {
     playAlbumIndex(nextIdx);
   }
 
-  // ---------- playlist ops ----------
-  function addToAlbum(sourceSlot) {
-    setErr("");
-
-    updateProject((prev) => {
-      const avail = deriveAvailableFromCatalog(prev);
-      const item = avail.find((a) => Number(a.sourceSlot) === Number(sourceSlot));
-      if (!item || !item.s3Key) return prev;
-
-      const current = Array.isArray(prev?.album?.songs) ? prev.album.songs : [];
-      const already = current.some((t) => Number(t.sourceSlot) === Number(sourceSlot));
-      if (already) return prev;
-
-      const nextSongs = [
-        ...current,
-        {
-          trackNo: current.length + 1,
-          sourceSlot: item.sourceSlot,
-          title: String(item.title || `Track ${current.length + 1}`),
-          file: { s3Key: item.s3Key },
-        },
-      ].map((t, idx) => ({ ...t, trackNo: idx + 1 }));
-
-      // ensure titleJson in catalog for persistence consistency
-      const nextCatalogSongs = Array.isArray(prev?.catalog?.songs) ? prev.catalog.songs : [];
-      const patchedCatalog = nextCatalogSongs.map((s) => {
-        if (Number(s?.slot) !== Number(sourceSlot)) return s;
-        const title = String(s?.title || item.title || "").trim();
-        return {
-          ...s,
-          title,
-          titleJson: ensureSongTitleJson(Number(sourceSlot), title),
-        };
-      });
-
-      // also mirror order for future nftMix page (no behavior dependency yet)
-      const nextNftMix = {
-        ...(prev.nftMix || {}),
-        albumOrder: nextSongs.map((t) => ({
-          trackNo: t.trackNo,
-          sourceSlot: t.sourceSlot,
-          title: t.title,
-          s3Key: t.file?.s3Key || "",
-        })),
-      };
-
-      return {
-        ...prev,
-        catalog: { ...(prev.catalog || {}), songs: patchedCatalog },
-        album: { ...(prev.album || {}), songs: nextSongs },
-        nftMix: nextNftMix,
-      };
-    });
-  }
-
-  function removeFromAlbum(idx) {
-    updateProject((prev) => {
-      const current = Array.isArray(prev?.album?.songs) ? prev.album.songs : [];
-      const nextSongs = current
-        .filter((_, i) => i !== idx)
-        .map((t, i) => ({ ...t, trackNo: i + 1 }));
-
-      const nextNftMix = {
-        ...(prev.nftMix || {}),
-        albumOrder: nextSongs.map((t) => ({
-          trackNo: t.trackNo,
-          sourceSlot: t.sourceSlot,
-          title: t.title,
-          s3Key: t.file?.s3Key || "",
-        })),
-      };
-
-      // if removing active track, pause
-      const a = audioRef.current;
-      if (a && idx === activeIndex) {
-        try {
-          a.pause();
-        } catch {}
-      }
-
-      return {
-        ...prev,
-        album: { ...(prev.album || {}), songs: nextSongs },
-        nftMix: nextNftMix,
-      };
-    });
-
-    // adjust local activeIndex view
-    setActiveIndex((prevIdx) => {
-      if (prevIdx === idx) return -1;
-      if (prevIdx > idx) return prevIdx - 1;
-      return prevIdx;
-    });
-  }
-
-  function move(idx, dir) {
-    updateProject((prev) => {
-      const current = Array.isArray(prev?.album?.songs) ? prev.album.songs : [];
-      const j = idx + dir;
-      if (j < 0 || j >= current.length) return prev;
-
-      const nextSongs = current.slice();
-      const tmp = nextSongs[idx];
-      nextSongs[idx] = nextSongs[j];
-      nextSongs[j] = tmp;
-
-      const normalized = nextSongs.map((t, i) => ({ ...t, trackNo: i + 1 }));
-
-      const nextNftMix = {
-        ...(prev.nftMix || {}),
-        albumOrder: normalized.map((t) => ({
-          trackNo: t.trackNo,
-          sourceSlot: t.sourceSlot,
-          title: t.title,
-          s3Key: t.file?.s3Key || "",
-        })),
-      };
-
-      return {
-        ...prev,
-        album: { ...(prev.album || {}), songs: normalized },
-        nftMix: nextNftMix,
-      };
-    });
-
-    // keep activeIndex pointed at same item after swap
-    setActiveIndex((prevIdx) => {
-      if (prevIdx === idx) return idx + dir;
-      if (prevIdx === idx + dir) return idx;
-      return prevIdx;
-    });
-  }
-
-  // ---------- drag & drop (simple) ----------
+  // ---------- drag & drop reorder (integrated) ----------
   function onDragStart(idx) {
     dragIndexRef.current = idx;
   }
@@ -450,41 +369,25 @@ export default function Album() {
   function onDrop(idx) {
     const from = dragIndexRef.current;
     dragIndexRef.current = null;
+
     if (from === null || from === undefined) return;
     if (from === idx) return;
 
-    updateProject((prev) => {
-      const current = Array.isArray(prev?.album?.songs) ? prev.album.songs : [];
-      if (!current.length) return prev;
+    const list = Array.isArray(project?.album?.songs) ? project.album.songs : [];
+    const nextList = list.slice();
+    const [moved] = nextList.splice(from, 1);
+    nextList.splice(idx, 0, moved);
 
-      const nextSongs = current.slice();
-      const [moved] = nextSongs.splice(from, 1);
-      nextSongs.splice(idx, 0, moved);
+    // Keep active track index roughly consistent:
+    // If active item moved, update activeIndex to new position.
+    const active = activeIndex;
+    let nextActive = active;
+    if (active === from) nextActive = idx;
+    else if (from < active && idx >= active) nextActive = active - 1;
+    else if (from > active && idx <= active) nextActive = active + 1;
 
-      const normalized = nextSongs.map((t, i) => ({ ...t, trackNo: i + 1 }));
-
-      const nextNftMix = {
-        ...(prev.nftMix || {}),
-        albumOrder: normalized.map((t) => ({
-          trackNo: t.trackNo,
-          sourceSlot: t.sourceSlot,
-          title: t.title,
-          s3Key: t.file?.s3Key || "",
-        })),
-      };
-
-      return {
-        ...prev,
-        album: { ...(prev.album || {}), songs: normalized },
-        nftMix: nextNftMix,
-      };
-    });
-
-    setActiveIndex((prevIdx) => {
-      if (prevIdx < 0) return prevIdx;
-      // best-effort: if active moved, keep it near same item; exact tracking not critical for v1
-      return prevIdx;
-    });
+    setActiveIndex(nextActive);
+    setAlbumSongs(nextList);
   }
 
   // ---------- meta ----------
@@ -507,7 +410,7 @@ export default function Album() {
     setErr("");
 
     if (!API_BASE) {
-      setErr("Missing VITE_API_BASE. Set it on the Render Static Site and redeploy.");
+      setErr("Missing VITE_API_BASE. Set it on Render Static Site and redeploy.");
       return;
     }
 
@@ -517,11 +420,14 @@ export default function Album() {
       fd.append("file", file);
       fd.append("projectId", projectId);
 
+      // query projectId for guaranteed backend resolution
       const res = await withTimeout(
-        fetch(`${API_BASE}/api/upload-to-s3`, {
+        fetch(`${API_BASE}/api/upload-to-s3?projectId=${encodeURIComponent(projectId)}`, {
           method: "POST",
           headers: {
             "X-Project-Id": projectId,
+            "X-ProjectId": projectId,
+            "X-SB-Project-Id": projectId,
           },
           body: fd,
         }),
@@ -537,7 +443,6 @@ export default function Album() {
       const s3Key = String(json?.s3Key || "").trim();
       if (!s3Key) throw new Error("Cover upload did not return s3Key");
 
-      // presign for preview (playback-url can sign any key)
       const url = await withTimeout(
         fetchPlaybackUrl({ apiBase: API_BASE, s3Key }),
         2 * 60 * 1000,
@@ -563,6 +468,27 @@ export default function Album() {
     }
   }
 
+  // ---------- small helpers ----------
+  function refreshFromCatalogNow() {
+    updateProject((prev) => {
+      const list = Array.isArray(prev?.album?.songs) ? prev.album.songs : [];
+      const refreshed = refreshAlbumFromCatalog(prev, list);
+      return {
+        ...prev,
+        album: { ...(prev.album || {}), songs: normalizeTrackNos(refreshed) },
+        nftMix: {
+          ...(prev.nftMix || {}),
+          albumOrder: normalizeTrackNos(refreshed).map((t) => ({
+            trackNo: t.trackNo,
+            sourceSlot: t.sourceSlot,
+            title: t.title,
+            s3Key: String(t?.file?.s3Key || ""),
+          })),
+        },
+      };
+    });
+  }
+
   // ---------- render ----------
   if (!projectId) return <div style={{ padding: 24, fontWeight: 900 }}>Missing projectId</div>;
 
@@ -574,6 +500,7 @@ export default function Album() {
 
   return (
     <div style={{ maxWidth: 1200 }}>
+      {/* Header */}
       <div
         style={{
           position: "sticky",
@@ -632,15 +559,15 @@ export default function Album() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginTop: 14 }}>
-        {/* LEFT: Playlist */}
+        {/* LEFT: Unified Album Playlist */}
         <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, background: "#fff" }}>
           <div style={{ padding: 12, borderBottom: "1px solid #eef2f7" }}>
             <div style={{ fontSize: 18, fontWeight: 950 }}>Album Playlist</div>
             <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
-              Source: Catalog (album files only). Default 8 tracks; if Catalog has more, they appear.
+              One line per song. Drag to reorder. Album-version only (Catalog → files.album.s3Key).
             </div>
 
-            <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
+            <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
               <button
                 type="button"
                 onClick={() => setLock("playlistComplete", !playlistComplete)}
@@ -652,177 +579,92 @@ export default function Album() {
                   fontWeight: 900,
                   cursor: "pointer",
                 }}
-                title="Toggle lock (persists)"
               >
                 {playlistComplete ? "✅ Playlist Saved" : "🔒 Playlist Locked"}
               </button>
 
+              <button
+                type="button"
+                onClick={refreshFromCatalogNow}
+                style={{
+                  padding: "8px 10px",
+                  borderRadius: 10,
+                  border: "1px solid #d1d5db",
+                  background: "#fff",
+                  fontWeight: 900,
+                  cursor: "pointer",
+                }}
+                title="Refresh titles + album s3Keys from current Catalog"
+              >
+                Refresh from Catalog
+              </button>
+
               <div style={{ fontSize: 12, opacity: 0.7 }}>
-                Drag & drop to reorder. This order is also mirrored to NFT Mix later.
+                This order will be mirrored to NFT Mix later.
               </div>
             </div>
           </div>
 
           <div style={{ padding: 12 }}>
-            {/* Available (catalog) */}
-            <div style={{ fontWeight: 950, marginBottom: 8 }}>Available from Catalog</div>
-            <div style={{ display: "grid", gap: 8 }}>
-              {available.map((a) => {
-                const inAlbum = list.some((t) => Number(t.sourceSlot) === Number(a.sourceSlot));
-                const canAdd = Boolean(a.s3Key) && !inAlbum;
-
-                return (
-                  <div
-                    key={`avail-${a.sourceSlot}`}
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      gap: 10,
-                      padding: 10,
-                      borderRadius: 10,
-                      border: "1px solid #eef2f7",
-                      background: "#fff",
-                      alignItems: "center",
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontWeight: 900 }}>
-                        Slot {a.sourceSlot}: {a.title || `Song ${a.sourceSlot}`}
-                      </div>
-                      <div style={{ fontSize: 12, opacity: 0.7, fontFamily: "monospace" }}>
-                        album.s3Key: {a.s3Key ? "✅" : "—"}
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => addToAlbum(a.sourceSlot)}
-                      disabled={!canAdd}
-                      style={{
-                        padding: "8px 10px",
-                        borderRadius: 10,
-                        border: "1px solid #111827",
-                        background: canAdd ? "#111827" : "#e5e7eb",
-                        color: canAdd ? "#fff" : "#6b7280",
-                        fontWeight: 900,
-                        cursor: canAdd ? "pointer" : "not-allowed",
-                        minWidth: 84,
-                      }}
-                    >
-                      {inAlbum ? "Added" : "Add"}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div style={{ height: 14 }} />
-
-            {/* Album order */}
-            <div style={{ fontWeight: 950, marginBottom: 8 }}>Album Order</div>
             {!list.length ? (
               <div style={{ padding: 12, borderRadius: 10, border: "1px solid #eef2f7", opacity: 0.8 }}>
-                No album tracks yet. Add tracks from the Catalog list above (album files only).
+                No album playlist found.
               </div>
             ) : (
               <div style={{ display: "grid", gap: 8 }}>
                 {list.map((t, idx) => {
-                  const active = idx === activeIndex;
+                  const hasAudio = Boolean(String(t?.file?.s3Key || "").trim());
+                  const isActive = idx === activeIndex;
+                  const rowPlaying = isActive && isPlaying;
+
                   return (
                     <div
-                      key={`track-${t.trackNo}-${t.sourceSlot}`}
+                      key={`album-row-${t.sourceSlot}`}
                       draggable
                       onDragStart={() => onDragStart(idx)}
                       onDragOver={(e) => e.preventDefault()}
                       onDrop={() => onDrop(idx)}
                       style={{
-                        padding: 10,
-                        borderRadius: 10,
+                        padding: 12,
+                        borderRadius: 12,
                         border: "1px solid #eef2f7",
-                        background: active ? "rgba(59,130,246,0.06)" : "#fff",
+                        background: isActive ? "rgba(59,130,246,0.06)" : "#fff",
                         display: "grid",
                         gridTemplateColumns: "1fr auto",
-                        gap: 10,
+                        gap: 12,
                         alignItems: "center",
                       }}
                       title="Drag to reorder"
                     >
                       <div>
-                        <div style={{ fontWeight: 950 }}>
-                          Track {idx + 1}: {t.title || `Track ${idx + 1}`}
+                        <div style={{ fontWeight: 950, fontSize: 18, lineHeight: 1.15 }}>
+                          Track {idx + 1}: {t.title || `Song ${t.sourceSlot}`}
                         </div>
-                        <div style={{ fontSize: 12, opacity: 0.75 }}>
-                          sourceSlot: <span style={{ fontFamily: "monospace" }}>{t.sourceSlot}</span>{" "}
-                          · s3Key:{" "}
-                          <span style={{ fontFamily: "monospace" }}>{t.file?.s3Key ? "✅" : "—"}</span>
+                        <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
+                          Slot {t.sourceSlot} · album audio:{" "}
+                          <span style={{ fontFamily: "monospace", fontWeight: 900 }}>
+                            {hasAudio ? "✅" : "—"}
+                          </span>
                         </div>
                       </div>
 
                       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                         <button
                           type="button"
-                          onClick={() => togglePlay(idx)}
-                          disabled={!t.file?.s3Key}
+                          onClick={() => toggleRowPlay(idx)}
+                          disabled={!hasAudio}
                           style={{
-                            padding: "8px 10px",
-                            borderRadius: 10,
+                            padding: "10px 12px",
+                            borderRadius: 12,
                             border: "1px solid #d1d5db",
                             background: "#fff",
-                            fontWeight: 900,
-                            cursor: t.file?.s3Key ? "pointer" : "not-allowed",
+                            fontWeight: 950,
+                            cursor: hasAudio ? "pointer" : "not-allowed",
+                            opacity: hasAudio ? 1 : 0.5,
+                            minWidth: 96,
                           }}
                         >
-                          {active && isPlaying ? "Pause" : "Play"}
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => move(idx, -1)}
-                          disabled={idx === 0}
-                          style={{
-                            padding: "8px 10px",
-                            borderRadius: 10,
-                            border: "1px solid #d1d5db",
-                            background: "#fff",
-                            fontWeight: 900,
-                            cursor: idx === 0 ? "not-allowed" : "pointer",
-                            opacity: idx === 0 ? 0.5 : 1,
-                          }}
-                        >
-                          ↑
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => move(idx, +1)}
-                          disabled={idx === list.length - 1}
-                          style={{
-                            padding: "8px 10px",
-                            borderRadius: 10,
-                            border: "1px solid #d1d5db",
-                            background: "#fff",
-                            fontWeight: 900,
-                            cursor: idx === list.length - 1 ? "not-allowed" : "pointer",
-                            opacity: idx === list.length - 1 ? 0.5 : 1,
-                          }}
-                        >
-                          ↓
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => removeFromAlbum(idx)}
-                          style={{
-                            padding: "8px 10px",
-                            borderRadius: 10,
-                            border: "1px solid rgba(244,63,94,0.35)",
-                            background: "rgba(244,63,94,0.08)",
-                            color: "#9f1239",
-                            fontWeight: 900,
-                            cursor: "pointer",
-                          }}
-                        >
-                          Remove
+                          {rowPlaying ? "Pause" : "Play"}
                         </button>
                       </div>
                     </div>
@@ -833,12 +675,12 @@ export default function Album() {
           </div>
         </div>
 
-        {/* RIGHT: Player */}
+        {/* RIGHT: Player + Meta + Cover */}
         <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, background: "#fff" }}>
           <div style={{ padding: 12, borderBottom: "1px solid #eef2f7" }}>
             <div style={{ fontSize: 18, fontWeight: 950 }}>Album Player</div>
             <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
-              Album play sequence (no side menu). Uses backend presigned URLs.
+              No side menu. Uses backend presigned URLs.
             </div>
           </div>
 
@@ -854,13 +696,13 @@ export default function Album() {
                 type="button"
                 onClick={() => {
                   if (activeIndex < 0 && list.length) playAlbumIndex(0);
-                  else togglePlay(activeIndex);
+                  else if (activeIndex >= 0) toggleRowPlay(activeIndex);
                 }}
                 disabled={!list.length}
                 style={{
                   padding: "10px 12px",
-                  fontWeight: 900,
-                  borderRadius: 10,
+                  fontWeight: 950,
+                  borderRadius: 12,
                   border: "1px solid #111827",
                   background: "#111827",
                   color: "#fff",
@@ -876,8 +718,8 @@ export default function Album() {
                 disabled={!list.length}
                 style={{
                   padding: "10px 12px",
-                  fontWeight: 900,
-                  borderRadius: 10,
+                  fontWeight: 950,
+                  borderRadius: 12,
                   border: "1px solid #d1d5db",
                   background: "#fff",
                 }}
@@ -891,8 +733,8 @@ export default function Album() {
                 disabled={!list.length}
                 style={{
                   padding: "10px 12px",
-                  fontWeight: 900,
-                  borderRadius: 10,
+                  fontWeight: 950,
+                  borderRadius: 12,
                   border: "1px solid #d1d5db",
                   background: "#fff",
                 }}
@@ -1079,7 +921,6 @@ export default function Album() {
                       alt="Album cover"
                       style={{ width: "100%", height: "100%", objectFit: "cover" }}
                       onError={async () => {
-                        // refresh preview url if presign expired
                         if (!API_BASE || !cover.s3Key) return;
                         try {
                           const fresh = await fetchPlaybackUrl({ apiBase: API_BASE, s3Key: cover.s3Key });
@@ -1095,9 +936,7 @@ export default function Album() {
                     />
                   </div>
                 ) : (
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>
-                    No cover uploaded yet.
-                  </div>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>No cover uploaded yet.</div>
                 )}
               </div>
             </div>
@@ -1105,13 +944,13 @@ export default function Album() {
         </div>
       </div>
 
-      {/* Pipeline note (no actions here yet) */}
+      {/* Pipeline note */}
       <div style={{ marginTop: 14, border: "1px solid #e5e7eb", borderRadius: 12, background: "#fff" }}>
         <div style={{ padding: 12 }}>
           <div style={{ fontWeight: 950 }}>Pipeline</div>
           <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
             Album page writes <span style={{ fontFamily: "monospace" }}>project.album.songs</span> (album-only order),
-            meta, and cover. Master Save later snapshots everything to S3 and drives the Export green check, then Publish.
+            meta, and cover. Master Save later snapshots everything to S3 and drives Export green checks, then Publish.
           </div>
         </div>
       </div>
