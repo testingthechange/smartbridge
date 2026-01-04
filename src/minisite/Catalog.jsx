@@ -3,7 +3,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useLocation } from "react-router-dom";
 
 import {
-  DEFAULT_API_BASE,
   MAX_UPLOAD_MB,
   VERSION_KEYS,
   loadProject,
@@ -72,6 +71,11 @@ export default function Catalog() {
     const sp = new URLSearchParams(location.search || "");
     return (sp.get("projectId") || "").trim();
   }, [params, location.search]);
+
+  // ✅ backend source: env only (no fallback)
+  const API_BASE = useMemo(() => {
+    return String(import.meta.env.VITE_BACKEND_URL || "").replace(/\/+$/, "");
+  }, []);
 
   const [project, setProject] = useState(() => loadProject(projectId));
 
@@ -210,6 +214,11 @@ export default function Catalog() {
     setErr("");
     const seq = ++playSeq.current;
 
+    if (!API_BASE) {
+      setErr("Missing VITE_BACKEND_URL");
+      return;
+    }
+
     const songNow = songs.find((s) => Number(s.slot) === Number(slot));
     const fileNow = songNow?.files?.[versionKey];
     const s3Key = fileNow?.s3Key || "";
@@ -222,7 +231,7 @@ export default function Catalog() {
       let url = fileNow?.playbackUrl || "";
       if (!url || forceRefresh) {
         url = await fetchPlaybackUrl({
-          apiBase: DEFAULT_API_BASE,
+          apiBase: API_BASE,
           s3Key,
         });
         updateSong(slot, (s) => ({
@@ -286,6 +295,11 @@ export default function Catalog() {
     if (!file) return;
     setErr("");
 
+    if (!API_BASE) {
+      setErr("Missing VITE_BACKEND_URL");
+      return;
+    }
+
     const mb = file.size / (1024 * 1024);
     if (mb > MAX_UPLOAD_MB) {
       setErr(`File too large (${mb.toFixed(1)}MB). Max is ${MAX_UPLOAD_MB}MB.`);
@@ -300,7 +314,7 @@ export default function Catalog() {
     try {
       const uploadResult = await withTimeout(
         uploadSongFile({
-          apiBase: DEFAULT_API_BASE,
+          apiBase: API_BASE,
           projectId,
           slot,
           versionKey,
@@ -333,7 +347,7 @@ export default function Catalog() {
 
       const freshUrl = await withTimeout(
         fetchPlaybackUrl({
-          apiBase: DEFAULT_API_BASE,
+          apiBase: API_BASE,
           s3Key: newS3Key,
         }),
         2 * 60 * 1000,
@@ -360,6 +374,11 @@ export default function Catalog() {
 
   async function masterSave() {
     setErr("");
+
+    if (!API_BASE) {
+      setErr("Missing VITE_BACKEND_URL");
+      return;
+    }
 
     const ok1 = window.confirm("Are you sure you're ready to save?");
     if (!ok1) return;
@@ -413,7 +432,7 @@ export default function Catalog() {
       const projectForBackend = projectForBackendFromSnapshot(snapshot);
 
       const out = await postMasterSave({
-        apiBase: DEFAULT_API_BASE,
+        apiBase: API_BASE,
         projectId,
         projectForBackend,
       });
@@ -477,7 +496,7 @@ export default function Catalog() {
 
           <div style={{ fontSize: 12, opacity: 0.6 }}>
             Backend:{" "}
-            <span style={{ fontFamily: "monospace" }}>{DEFAULT_API_BASE}</span>
+            <span style={{ fontFamily: "monospace" }}>{API_BASE}</span>
           </div>
         </div>
 

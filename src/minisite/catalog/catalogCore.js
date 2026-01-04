@@ -122,10 +122,14 @@ export async function uploadSongFile({
   fd.append("file", file);
   fd.append("s3Key", s3Key);
 
-  const res = await fetch(`${apiBase}/api/upload-to-s3`, {
-    method: "POST",
-    body: fd,
-  });
+  // ✅ ONE-LINE FIX: always include projectId so backend never has to guess it
+  const res = await fetch(
+    `${apiBase}/api/upload-to-s3?projectId=${encodeURIComponent(String(projectId || ""))}`,
+    {
+      method: "POST",
+      body: fd,
+    }
+  );
 
   const json = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(json?.error || `Upload failed (${res.status})`);
@@ -206,7 +210,7 @@ function normalizeCatalogSongsForProject(project) {
         b: {
           fileName: String(files?.b?.fileName || ""),
           s3Key: String(files?.b?.s3Key || ""),
-          playbackUrl: String(files?.b?.playbackUrl || ""),
+          playbackUrl: String(files?.b?.playbackbackUrl || ""),
         },
       },
     };
