@@ -51,13 +51,11 @@ export default function Project() {
   const { projectId } = useParams();
   const [snap, setSnap] = useState(null);
 
-  // load on mount / project change
   useEffect(() => {
     if (!projectId) return;
     setSnap(loadProjectLocal(projectId));
   }, [projectId]);
 
-  // refresh on focus (coming back from Export page)
   useEffect(() => {
     const onFocus = () => {
       if (!projectId) return;
@@ -67,7 +65,6 @@ export default function Project() {
     return () => window.removeEventListener("focus", onFocus);
   }, [projectId]);
 
-  // refresh if localStorage changes (same-tab writes won't fire storage event, but other tabs will)
   useEffect(() => {
     const onStorage = (e) => {
       if (!projectId) return;
@@ -81,7 +78,6 @@ export default function Project() {
 
   const producerId = safeString(snap?.producerId);
 
-  // ✅ publish: prefer project blob; fallback to producer index row
   const pub = useMemo(() => {
     const p = snap?.publish || {};
     const fromBlob = {
@@ -93,7 +89,11 @@ export default function Project() {
     };
 
     const hasAny =
-      !!fromBlob.lastShareId || !!fromBlob.lastPublicUrl || !!fromBlob.manifestKey || !!fromBlob.publishedAt || !!fromBlob.snapshotKey;
+      !!fromBlob.lastShareId ||
+      !!fromBlob.lastPublicUrl ||
+      !!fromBlob.manifestKey ||
+      !!fromBlob.publishedAt ||
+      !!fromBlob.snapshotKey;
 
     if (hasAny) return fromBlob;
 
@@ -105,14 +105,19 @@ export default function Project() {
 
   return (
     <div style={{ maxWidth: 1100 }}>
-      <div style={{ fontSize: 34, fontWeight: 900, color: "#0f172a" }}>{snap?.projectName || "Project"}</div>
+      <div style={{ fontSize: 34, fontWeight: 900, color: "#0f172a" }}>
+        {snap?.projectName || "Project"}
+      </div>
 
       <div style={{ marginTop: 6, fontSize: 13, opacity: 0.75 }}>
-        Project ID: <strong>{projectId}</strong> · Producer: <strong>{producerId || "—"}</strong>
+        Project ID: <strong>{projectId}</strong> · Producer:{" "}
+        <strong>{producerId || "—"}</strong>
       </div>
 
       <div style={{ marginTop: 14, ...card() }}>
-        <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>Mini-site</div>
+        <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>
+          Mini-site
+        </div>
 
         <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
           <Link to={`/minisite/${projectId}/catalog`} style={pill()}>
@@ -138,17 +143,22 @@ export default function Project() {
       </div>
 
       <div style={{ marginTop: 14, ...card() }}>
-        <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>Publish</div>
+        <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>
+          Publish
+        </div>
 
         <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.7 }}>
           <div>
-            Published At: {pub?.publishedAt ? <code>{pub.publishedAt}</code> : <span style={{ opacity: 0.65 }}>—</span>}
+            Published At:{" "}
+            {pub?.publishedAt ? <code>{pub.publishedAt}</code> : <span style={{ opacity: 0.65 }}>—</span>}
           </div>
           <div>
-            Share ID: {pub?.lastShareId ? <code>{pub.lastShareId}</code> : <span style={{ opacity: 0.65 }}>—</span>}
+            Share ID:{" "}
+            {pub?.lastShareId ? <code>{pub.lastShareId}</code> : <span style={{ opacity: 0.65 }}>—</span>}
           </div>
           <div>
-            Manifest Key: {pub?.manifestKey ? <code>{pub.manifestKey}</code> : <span style={{ opacity: 0.65 }}>—</span>}
+            Manifest Key:{" "}
+            {pub?.manifestKey ? <code>{pub.manifestKey}</code> : <span style={{ opacity: 0.65 }}>—</span>}
           </div>
           <div>
             Public URL:{" "}
@@ -161,7 +171,8 @@ export default function Project() {
             )}
           </div>
           <div>
-            Snapshot Key: {pub?.snapshotKey ? <code>{pub.snapshotKey}</code> : <span style={{ opacity: 0.65 }}>—</span>}
+            Snapshot Key:{" "}
+            {pub?.snapshotKey ? <code>{pub.snapshotKey}</code> : <span style={{ opacity: 0.65 }}>—</span>}
           </div>
 
           <div style={{ marginTop: 10 }}>
@@ -173,7 +184,9 @@ export default function Project() {
       </div>
 
       <div style={{ marginTop: 14 }}>
-        <div style={{ fontSize: 14, fontWeight: 900, color: "#0f172a" }}>Local project snapshot (debug)</div>
+        <div style={{ fontSize: 14, fontWeight: 900, color: "#0f172a" }}>
+          Local project snapshot (debug)
+        </div>
         <pre style={pre()}>{snap ? JSON.stringify(snap, null, 2) : "{\n  \n}"}</pre>
       </div>
 
@@ -207,11 +220,7 @@ function pill() {
 }
 
 function ghostLink() {
-  return {
-    textDecoration: "none",
-    fontWeight: 900,
-    color: "#1d4ed8",
-  };
+  return { textDecoration: "none", fontWeight: 900, color: "#1d4ed8" };
 }
 
 function pre() {

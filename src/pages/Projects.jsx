@@ -46,7 +46,31 @@ function loadProjectsIndex(producerId) {
 }
 
 function saveProjectsIndex(producerId, rows) {
-  localStorage.setItem(indexKey(producerId), JSON.stringify(Array.isArray(rows) ? rows : []));
+  localStorage.setItem(
+    indexKey(producerId),
+    JSON.stringify(Array.isArray(rows) ? rows : [])
+  );
+}
+
+function hasAnyPublish(p) {
+  if (!p) return false;
+  return (
+    !!safeString(p.lastShareId) ||
+    !!safeString(p.lastPublicUrl) ||
+    !!safeString(p.manifestKey) ||
+    !!safeString(p.publishedAt) ||
+    !!safeString(p.snapshotKey)
+  );
+}
+
+function isPublishComplete(p) {
+  // ✅ stricter: only show Published when we have a real publish result
+  const lastShareId = safeString(p?.lastShareId);
+  const lastPublicUrl = safeString(p?.lastPublicUrl);
+  const manifestKey = safeString(p?.manifestKey);
+  const publishedAt = safeString(p?.publishedAt);
+
+  return !!lastShareId && !!lastPublicUrl && !!manifestKey && !!publishedAt;
 }
 
 /**
@@ -71,23 +95,37 @@ function deriveStatusFromProjectBlob(projectId) {
         manifestKey: "",
         snapshotKey: "",
       },
+      hasProjectBlob: false,
     };
   }
 
+  // Legacy-ish fields
   const catalogSavedAt = safeString(p?.catalog?.masterSave?.savedAt);
   const catalogS3Path = safeString(p?.catalog?.masterSave?.s3Path);
 
+  // Unified master-save model
   const unifiedSavedAt = safeString(p?.masterSave?.lastMasterSaveAt || "");
   const unifiedCatalogComplete = !!p?.masterSave?.sections?.catalog?.complete;
 
   const isMasterSaved = !!catalogSavedAt || !!unifiedSavedAt || !!unifiedCatalogComplete;
-  const masterSavedAt = catalogSavedAt || unifiedSavedAt || safeString(p?.masterSave?.sections?.catalog?.masterSavedAt);
+  const masterSavedAt =
+    catalogSavedAt ||
+    unifiedSavedAt ||
+    safeString(p?.masterSave?.sections?.catalog?.masterSavedAt);
 
-  const producerReturnReceived = !!p?.master?.producerReturnReceived || !!p?.masterSave?.producerReturnReceived;
+  const producerReturnReceived =
+    !!p?.master?.producerReturnReceived || !!p?.masterSave?.producerReturnReceived;
+
   const producerReturnReceivedAt =
-    safeString(p?.master?.producerReturnReceivedAt) || safeString(p?.masterSave?.producerReturnReceivedAt);
+    safeString(p?.master?.producerReturnReceivedAt) ||
+    safeString(p?.masterSave?.producerReturnReceivedAt);
 
-  const lastSnapshotKey = catalogS3Path || safeString(p?.master?.lastSnapshotKey) || "";
+  // Snapshot key (prefer unified publish.snapshotKey if present, else legacy lastSnapshotKey/s3Path)
+  const lastSnapshotKey =
+    safeString(p?.publish?.snapshotKey) ||
+    catalogS3Path ||
+    safeString(p?.master?.lastSnapshotKey) ||
+    "";
 
   const publish = {
     lastShareId: safeString(p?.publish?.lastShareId),
@@ -104,26 +142,47 @@ function deriveStatusFromProjectBlob(projectId) {
     producerReturnReceivedAt,
     lastSnapshotKey,
     publish,
+    hasProjectBlob: true,
   };
+}
+
+function Badge({ ok, label, title }) {
+  return (
+    <span
+      title={title || ""}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        fontSize: 12,
+        fontWeight: 950,
+        padding: "6px 10px",
+        borderRadius: 999,
+        border: "1px solid #d1d5db",
+        background: ok ? "rgba(16,185,129,0.12)" : "#f8fafc",
+        color: ok ? "#065f46" : "#111827",
+      }}
+    >
+      {ok ? "✅" : "—"} {label}
+    </span>
+  );
 }
 
 export default function Projects() {
   const { producerId } = useParams();
 
   const [rows, setRows] = useState(() => loadProjectsIndex(producerId));
-
-  const [form, setForm] = useState({
-    projectName: "",
-    date: "",
-    company: "",
-  });
+  const [form, setForm] = useState({ projectName: "", date: "", company: "" });
 
   // Persist rows (producer-scoped)
   useEffect(() => {
     saveProjectsIndex(producerId, rows);
   }, [rows, producerId]);
 
-  const existingIds = useMemo(() => new Set((rows || []).map((r) => String(r.projectId))), [rows]);
+  const existingIds = useMemo(
+    () => new Set((rows || []).map((r) => String(r.projectId))),
+    [rows]
+  );
 
   // Re-derive status from project_{id} whenever we land here or list length changes
   useEffect(() => {
@@ -133,25 +192,36 @@ export default function Projects() {
       (prev || []).map((r) => {
         const derived = deriveStatusFromProjectBlob(r.projectId);
 
-        return {
-          ...r,
-          master: {
-            ...(r.master || {}),
-            isMasterSaved: derived.isMasterSaved,
-            masterSavedAt: derived.masterSavedAt || r?.master?.masterSavedAt || "",
-            lastSnapshotKey: derived.lastSnapshotKey || r?.master?.lastSnapshotKey || "",
-            producerReturnReceived: derived.producerReturnReceived || !!r?.master?.producerReturnReceived,
-            producerReturnReceivedAt: derived.producerReturnReceivedAt || r?.master?.producerReturnReceivedAt || "",
-          },
-          publish: {
-            ...(r.publish || {}),
-            lastShareId: derived.publish.lastShareId || r?.publish?.lastShareId || "",
-            lastPublicUrl: derived.publish.lastPublicUrl || r?.publish?.lastPublicUrl || "",
-            publishedAt: derived.publish.publishedAt || r?.publish?.publishedAt || "",
-            manifestKey: derived.publish.manifestKey || r?.publish?.manifestKey || "",
-            snapshotKey: derived.publish.snapshotKey || r?.publish?.snapshotKey || "",
-          },
+        // Master/Return always derive from project blob when present
+        const nextMaster = {
+          ...(r.master || {}),
+          isMasterSaved: !!derived.isMasterSaved,
+          masterSavedAt: safeString(derived.masterSavedAt) || "",
+          lastSnapshotKey: safeString(derived.lastSnapshotKey) || "",
+          producerReturnReceived: !!derived.producerReturnReceived,
+          producerReturnReceivedAt: safeString(derived.producerReturnReceivedAt) || "",
         };
+
+        // Publish: prefer project blob if it has ANY publish fields; otherwise keep index row
+        const derivedPublish = derived.publish || {};
+        const nextPublish = hasAnyPublish(derivedPublish)
+          ? {
+              lastShareId: safeString(derivedPublish.lastShareId),
+              lastPublicUrl: safeString(derivedPublish.lastPublicUrl),
+              publishedAt: safeString(derivedPublish.publishedAt),
+              manifestKey: safeString(derivedPublish.manifestKey),
+              snapshotKey: safeString(derivedPublish.snapshotKey),
+            }
+          : {
+              ...(r.publish || {}),
+              lastShareId: safeString(r?.publish?.lastShareId),
+              lastPublicUrl: safeString(r?.publish?.lastPublicUrl),
+              publishedAt: safeString(r?.publish?.publishedAt),
+              manifestKey: safeString(r?.publish?.manifestKey),
+              snapshotKey: safeString(r?.publish?.snapshotKey),
+            };
+
+        return { ...r, master: nextMaster, publish: nextPublish };
       })
     );
   }, [producerId, rows?.length]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -220,15 +290,37 @@ export default function Projects() {
 
   return (
     <div style={{ maxWidth: 1100 }}>
-      <div style={{ fontSize: 26, fontWeight: 900, color: "#0f172a" }}>Projects</div>
+      <div style={{ fontSize: 26, fontWeight: 900, color: "#0f172a" }}>
+        Projects
+      </div>
       <div style={{ marginTop: 6, fontSize: 13, opacity: 0.75 }}>
-        Producer: <span style={{ fontFamily: "monospace", fontWeight: 900 }}>{producerId}</span>
+        Producer:{" "}
+        <span style={{ fontFamily: "monospace", fontWeight: 900 }}>
+          {producerId}
+        </span>
       </div>
 
-      <div style={{ marginTop: 14, border: "1px solid #e5e7eb", borderRadius: 16, padding: 14, background: "#fff" }}>
-        <div style={{ fontSize: 16, fontWeight: 900, color: "#0f172a" }}>Create Project</div>
+      <div
+        style={{
+          marginTop: 14,
+          border: "1px solid #e5e7eb",
+          borderRadius: 16,
+          padding: 14,
+          background: "#fff",
+        }}
+      >
+        <div style={{ fontSize: 16, fontWeight: 900, color: "#0f172a" }}>
+          Create Project
+        </div>
 
-        <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
+        <div
+          style={{
+            marginTop: 10,
+            display: "grid",
+            gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+            gap: 12,
+          }}
+        >
           <Field
             label="Project Name"
             value={form.projectName}
@@ -236,7 +328,12 @@ export default function Projects() {
             placeholder="e.g. Maya — Album Return"
           />
 
-          <Field label="Date" type="date" value={form.date} onChange={(v) => setForm((p) => ({ ...p, date: v }))} />
+          <Field
+            label="Date"
+            type="date"
+            value={form.date}
+            onChange={(v) => setForm((p) => ({ ...p, date: v }))}
+          />
 
           <Field
             label="Company"
@@ -246,7 +343,16 @@ export default function Projects() {
           />
 
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>Producer ID</div>
+            <div
+              style={{
+                fontSize: 12,
+                fontWeight: 900,
+                opacity: 0.7,
+                textTransform: "uppercase",
+              }}
+            >
+              Producer ID
+            </div>
             <input
               value={safeString(producerId)}
               readOnly
@@ -285,20 +391,44 @@ export default function Projects() {
       </div>
 
       <div style={{ marginTop: 16 }}>
-        <div style={{ fontSize: 16, fontWeight: 900, color: "#0f172a" }}>Project List</div>
+        <div style={{ fontSize: 16, fontWeight: 900, color: "#0f172a" }}>
+          Project List
+        </div>
 
-        <div style={{ marginTop: 10, border: "1px solid #e5e7eb", borderRadius: 16, overflow: "hidden" }}>
-          <div style={{ display: "flex", padding: 12, background: "#f8fafc", borderBottom: "1px solid #e5e7eb" }}>
-            <div style={{ width: 110, fontWeight: 900, fontSize: 12, opacity: 0.7 }}>Project ID</div>
-            <div style={{ flex: 1, fontWeight: 900, fontSize: 12, opacity: 0.7 }}>Project</div>
-            <div style={{ width: 170, fontWeight: 900, fontSize: 12, opacity: 0.7 }}>Company</div>
-            <div style={{ width: 260, fontWeight: 900, fontSize: 12, opacity: 0.7 }}>Status</div>
+        <div
+          style={{
+            marginTop: 10,
+            border: "1px solid #e5e7eb",
+            borderRadius: 16,
+            overflow: "hidden",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              padding: 12,
+              background: "#f8fafc",
+              borderBottom: "1px solid #e5e7eb",
+            }}
+          >
+            <div style={{ width: 110, fontWeight: 900, fontSize: 12, opacity: 0.7 }}>
+              Project ID
+            </div>
+            <div style={{ flex: 1, fontWeight: 900, fontSize: 12, opacity: 0.7 }}>
+              Project
+            </div>
+            <div style={{ width: 170, fontWeight: 900, fontSize: 12, opacity: 0.7 }}>
+              Company
+            </div>
+            <div style={{ width: 360, fontWeight: 900, fontSize: 12, opacity: 0.7 }}>
+              Status
+            </div>
           </div>
 
           {(rows || []).map((r) => {
             const isMasterSaved = !!r?.master?.isMasterSaved;
             const returnReceived = !!r?.master?.producerReturnReceived;
-            const published = !!r?.publish?.lastPublicUrl;
+            const published = isPublishComplete(r?.publish);
 
             return (
               <div
@@ -312,46 +442,68 @@ export default function Projects() {
                 }}
               >
                 <div style={{ width: 110, fontFamily: "monospace", fontWeight: 900 }}>
-                  <Link to={`/projects/${r.projectId}`} style={{ textDecoration: "none", color: "#111827" }} title="Open project">
+                  <Link
+                    to={`/projects/${r.projectId}`}
+                    style={{ textDecoration: "none", color: "#111827" }}
+                    title="Open project"
+                  >
                     {r.projectId}
                   </Link>
                 </div>
 
-                <div style={{ flex: 1, fontWeight: 800, color: "#0f172a" }}>{r.projectName}</div>
+                <div style={{ flex: 1, fontWeight: 800, color: "#0f172a" }}>
+                  {r.projectName}
+                </div>
 
-                <div style={{ width: 170, opacity: 0.85 }}>{r.company || "—"}</div>
+                <div style={{ width: 170, opacity: 0.85 }}>
+                  {r.company || "—"}
+                </div>
 
-                <div style={{ width: 260, fontWeight: 900, display: "flex", gap: 10, alignItems: "center" }}>
-                  <span title={r?.master?.masterSavedAt ? `Master saved at ${r.master.masterSavedAt}` : ""}>
-                    {returnReceived ? "✅ Return" : isMasterSaved ? "✅ Master" : "—"}
-                  </span>
+                <div
+                  style={{
+                    width: 360,
+                    display: "flex",
+                    gap: 10,
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <Badge
+                    ok={isMasterSaved}
+                    label="Master"
+                    title={r?.master?.masterSavedAt ? `Master saved at ${r.master.masterSavedAt}` : ""}
+                  />
+                  <Badge
+                    ok={returnReceived}
+                    label="Return"
+                    title={
+                      r?.master?.producerReturnReceivedAt
+                        ? `Return received at ${r.master.producerReturnReceivedAt}`
+                        : ""
+                    }
+                  />
 
                   {published ? (
                     <a
-                      href={r.publish.lastPublicUrl}
+                      href={safeString(r?.publish?.lastPublicUrl)}
                       target="_blank"
                       rel="noreferrer"
-                      style={{
-                        textDecoration: "none",
-                        fontWeight: 900,
-                        fontSize: 12,
-                        border: "1px solid #d1d5db",
-                        background: "#f8fafc",
-                        color: "#111827",
-                        padding: "6px 10px",
-                        borderRadius: 999,
-                      }}
+                      style={{ textDecoration: "none" }}
                       title="Open published mini-site"
                     >
-                      ✅ Published
+                      <Badge ok={true} label="Published" />
                     </a>
-                  ) : null}
+                  ) : (
+                    <Badge ok={false} label="Published" />
+                  )}
                 </div>
               </div>
             );
           })}
 
-          {!rows?.length ? <div style={{ padding: 12, background: "#fff" }}>No projects yet.</div> : null}
+          {!rows?.length ? (
+            <div style={{ padding: 12, background: "#fff" }}>No projects yet.</div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -362,7 +514,9 @@ function Field({ label, type = "text", value, onChange, placeholder }) {
   const isDate = type === "date";
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>{label}</div>
+      <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>
+        {label}
+      </div>
       <input
         type={type}
         value={value}
