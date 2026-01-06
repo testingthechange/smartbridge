@@ -1,36 +1,130 @@
-// storage.cjs (local-first storage for smartbridge backend)
-// Writes JSON to ./.local_storage/<key>
+// server.cjs
+const express = require("express");
+const cors = require("cors");
+const multer = require("multer");
+const {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+} = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
-const fs = require("fs");
-const path = require("path");
+const app = express();
+app.use(express.json());
 
-const ROOT = path.join(process.cwd(), ".local_storage");
+// ---------- ENV ----------
+const PORT = process.env.PORT || 10000;
+const AWS_REGION = process.env.AWS_REGION || "us-west-1";
+const S3_BUCKET = process.env.S3_BUCKET || process.env.AWS_S3_BUCKET || "";
+const SIGNED_URL_EXPIRES_SECONDS = Number(
+  process.env.SIGNED_URL_EXPIRES_SECONDS || 1200
+);
 
-function ensureDir(p) {
-  fs.mkdirSync(p, { recursive: true });
+const ALLOWED_ORIGINS = [
+  "https://blackout-web.onrender.com",
+  "https://smartbridge-web.onrender.com", // keep if you have it
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+].filter(Boolean);
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // allow no-origin (curl/postman) + allowlist; but don't block in prod debugging
+      if (!origin) return cb(null, true);
+      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      return cb(null, true);
+    },
+    methods: ["GET", "POST", "OPTIONS", "PUT"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+// ---------- S3 ----------
+const s3 = new S3Client({ region: AWS_REGION });
+
+// ---------- UPLOAD (multer in-memory) ----------
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 30 * 1024 * 1024 }, // 30MB
+});
+
+// ---------- HELPERS ----------
+function must(v, msg) {
+  if (!v) throw new Error(msg);
+  return v;
 }
 
-function keyToPath(key) {
-  const safe = String(key || "").replace(/^\/+/, "");
-  return path.join(ROOT, safe);
-}
+// ---------- HEALTH ----------
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true, service: "smartbridge-backend", version: 1 });
+});
 
-async function putJson(key, obj) {
-  const filePath = keyToPath(key);
-  ensureDir(path.dirname(filePath));
-  fs.writeFileSync(filePath, JSON.stringify(obj ?? {}, null, 2), "utf8");
-  return { ok: true, key };
-}
-
-async function getJson(key) {
-  const filePath = keyToPath(key);
-  if (!fs.existsSync(filePath)) return null;
-  const raw = fs.readFileSync(filePath, "utf8");
+// ---------- UPLOAD HANDLER (shared) ----------
+async function uploadToS3Handler(req, res) {
   try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
+    const projectId = String(req.query.projectId || "").trim();
+    if (!projectId) {
+      return res.status(400).json({ ok: false, error: "missing projectId" });
+    }
+
+    const file = req.file;
+    const s3Key = String(req.body && req.body.s3Key ? req.body.s3Key : "").trim();
+
+    if (!file) {
+      return res.status(400).json({ ok: false, error: "missing file" });
+    }
+    if (!s3Key) {
+      return res.status(400).json({ ok: false, error: "missing s3Key" });
+    }
+
+    const bucket = must(S3_BUCKET, "Missing env S3_BUCKET (or AWS_S3_BUCKET)");
+
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: s3Key,
+        Body: file.buffer,
+        ContentType: file.mimetype || "application/octet-stream",
+        Metadata: {
+          projectid: projectId,
+        },
+      })
+    );
+
+    return res.json({ ok: true, bucket, s3Key });
+  } catch (e) {
+    console.error("upload-to-s3 error:", e);
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 }
 
-module.exports = { putJson, getJson };
+// ✅ CRITICAL FIX: mount BOTH paths so old/new frontend both work
+app.post("/upload-to-s3", upload.single("file"), uploadToS3Handler);
+app.post("/api/upload-to-s3", upload.single("file"), uploadToS3Handler);
+
+// ---------- PLAYBACK URL ----------
+app.get("/api/playback-url", async (req, res) => {
+  try {
+    const s3Key = String(req.query.s3Key || "").trim();
+    if (!s3Key) return res.status(400).json({ ok: false, error: "missing s3Key" });
+
+    const bucket = must(S3_BUCKET, "Missing env S3_BUCKET (or AWS_S3_BUCKET)");
+
+    const cmd = new GetObjectCommand({ Bucket: bucket, Key: s3Key });
+    const url = await getSignedUrl(s3, cmd, {
+      expiresIn: SIGNED_URL_EXPIRES_SECONDS,
+    });
+
+    return res.json({ ok: true, url, expiresSeconds: SIGNED_URL_EXPIRES_SECONDS });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+// ---------- START ----------
+app.listen(PORT, () => {
+  console.log(`smartbridge-backend listening on ${PORT}`);
+  console.log(`AWS_REGION=${AWS_REGION}`);
+  console.log(`S3_BUCKET=${S3_BUCKET || "(missing)"}`);
+});
