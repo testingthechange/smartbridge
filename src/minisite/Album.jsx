@@ -1,4 +1,8 @@
 // src/minisite/Album.jsx
+<div style={{ marginTop: 6, fontSize: 12, fontFamily: "monospace", opacity: 0.7 }}>
+  BUILD_STAMP: 2026-01-06__LOCKTEST__A
+</div>
+
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
 
