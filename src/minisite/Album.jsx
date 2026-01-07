@@ -16,7 +16,7 @@ import {
   postMasterSave,
 } from "./catalog/catalogCore.js";
 
-const ALBUM_BUILD_STAMP = "STAMP-ALBUM-LOCKS-AUTO-DEPLOY-OK-2026-01-07-E";
+const ALBUM_BUILD_STAMP = "STAMP-ALBUM-LOCKSHIELD-2026-01-07-F";
 
 function withTimeout(promise, ms, msg) {
   return Promise.race([
