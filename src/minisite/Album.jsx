@@ -1,7 +1,4 @@
 // src/minisite/Album.jsx
-<div style={{ marginTop: 6, fontSize: 12, fontFamily: "monospace", opacity: 0.7 }}>
-  BUILD_STAMP: 2026-01-06__LOCKTEST__A
-</div>
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
@@ -18,6 +15,8 @@ import {
   projectForBackendFromSnapshot,
   postMasterSave,
 } from "./catalog/catalogCore.js";
+
+const ALBUM_BUILD_STAMP = "8ad69c6";
 
 function withTimeout(promise, ms, msg) {
   return Promise.race([
@@ -708,6 +707,10 @@ export default function Album() {
             </div>
           </div>
         </div>
+
+        <div style={{ marginTop: 6 }}>
+  Build: <span style={{ fontFamily: "monospace", fontWeight: 900 }}>{ALBUM_BUILD_STAMP}</span>
+</div>
 
         {busy ? <div style={{ marginTop: 10, fontWeight: 800 }}>{busy}</div> : null}
         {err ? (
