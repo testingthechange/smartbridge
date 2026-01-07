@@ -1,15 +1,13 @@
-name: Deploy to Render
+name: Render Deploy Ping
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
 
 jobs:
-  deploy:
+  ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Render deploy hook
-        run: |
-          curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
-    env:
-      RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+      - name: Confirm push event
+        run: echo "GitHub push detected on main branch"
