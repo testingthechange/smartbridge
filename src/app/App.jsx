@@ -30,7 +30,8 @@ function AppShell() {
     <div style={{ display: "flex", minHeight: "100vh", background: "#fafafa" }}>
       <SideNav />
       <main style={{ flex: 1, padding: 16 }}>
-        <Outlet />
+        <div style={{ fontSize: 12, opacity: 0.65, marginBottom: 10 }}>Build: <span style={{ fontFamily: "monospace", fontWeight: 900 }}>STAMP-APP-VERIFY-2026-01-07-B</span></div>
+<Outlet />
       </main>
     </div>
   );
