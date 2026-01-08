@@ -134,6 +134,11 @@ export default function Album() {
     coverComplete: false,
   });
 
+  // Master Save (no popups)
+  const [msArmed, setMsArmed] = useState(false);
+  const [msBusy, setMsBusy] = useState(false);
+  const [msMsg, setMsMsg] = useState("");
+
   // player
   const audioRef = useRef(null);
   const playSeq = useRef(0);
@@ -285,6 +290,59 @@ export default function Album() {
       setProject(next);
     } finally {
       setLockBusy(false);
+    }
+  }
+
+  async function masterSaveAlbum() {
+    if (msBusy) return;
+    setMsBusy(true);
+    setMsMsg("");
+    setErr("");
+
+    try {
+      const current = rereadProject() || project;
+      if (!current) {
+        setMsMsg("No project loaded.");
+        return;
+      }
+
+      // Snapshot playlist/meta/cover regardless of locks
+      const snapshotPlaylist = playlistLocked
+        ? (Array.isArray(current?.album?.songs) ? current.album.songs : [])
+        : buildAlbumPlaylistFromCatalog(current);
+
+      const snapshot = {
+        buildStamp: ALBUM_BUILD_STAMP,
+        savedAt: new Date().toISOString(),
+        projectId,
+        locks: {
+          playlistComplete: Boolean(locksUI.playlistComplete),
+          metaComplete: Boolean(locksUI.metaComplete),
+          coverComplete: Boolean(locksUI.coverComplete),
+        },
+        playlist: snapshotPlaylist,
+        meta: { ...(current?.album?.meta || {}) },
+        cover: { ...(current?.album?.cover || {}) },
+      };
+
+      const next = {
+        ...current,
+        album: {
+          ...(current?.album || {}),
+          masterSave: snapshot,
+        },
+        updatedAt: new Date().toISOString(),
+      };
+
+      saveProject(projectId, next);
+      setProject(next);
+
+      setMsMsg(`Album Master Saved @ ${snapshot.savedAt}`);
+      setMsArmed(false);
+    } catch (e) {
+      setErr(e?.message || "Master Save failed");
+    } finally {
+      setMsBusy(false);
     }
   }
 
@@ -592,6 +650,143 @@ export default function Album() {
             />
           </div>
         ) : null}
+      </div>
+
+      <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid #ddd" }}>
+        <div style={{ fontSize: 18, fontWeight: 950 }}>Master Save</div>
+
+        {msMsg ? <div style={{ marginTop: 8, fontFamily: "monospace", fontSize: 12 }}>{msMsg}</div> : null}
+
+        {!msArmed ? (
+          <button
+            type="button"
+            onClick={() => setMsArmed(true)}
+            disabled={msBusy}
+            style={{
+              marginTop: 10,
+              padding: "10px 12px",
+              borderRadius: 12,
+              border: "1px solid #ddd",
+              background: "#fff",
+              fontWeight: 950,
+              cursor: msBusy ? "not-allowed" : "pointer",
+              opacity: msBusy ? 0.6 : 1,
+            }}
+          >
+            Master Save Album…
+          </button>
+        ) : (
+          <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <button
+              type="button"
+              onClick={masterSaveAlbum}
+              disabled={msBusy}
+              style={{
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid #ddd",
+                background: "#fff",
+                fontWeight: 950,
+                cursor: msBusy ? "not-allowed" : "pointer",
+                opacity: msBusy ? 0.6 : 1,
+              }}
+            >
+              Confirm Master Save
+            </button>
+            <button
+              type="button"
+              onClick={() => setMsArmed(false)}
+              disabled={msBusy}
+              style={{
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid #ddd",
+                background: "#fff",
+                fontWeight: 900,
+                cursor: msBusy ? "not-allowed" : "pointer",
+                opacity: msBusy ? 0.6 : 1,
+              }}
+            >
+              Cancel
+            </button>
+            <div style={{ fontSize: 12, opacity: 0.7 }}>
+              Writes album.masterSave snapshot (playlist/meta/cover/locks/buildStamp).
+            </div>
+          </div>
+        )}
+
+        <div style={{ marginTop: 10, fontFamily: "monospace", fontSize: 12, opacity: 0.85 }}>
+          stored:{" "}
+          {project?.album?.masterSave?.savedAt ? `album.masterSave.savedAt=${project.album.masterSave.savedAt}` : "—"}
+        </div>
+      </div>
+      <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid #ddd" }}>
+        <div style={{ fontSize: 18, fontWeight: 950 }}>Master Save</div>
+
+        {msMsg ? <div style={{ marginTop: 8, fontFamily: "monospace", fontSize: 12 }}>{msMsg}</div> : null}
+
+        {!msArmed ? (
+          <button
+            type="button"
+            onClick={() => setMsArmed(true)}
+            disabled={msBusy}
+            style={{
+              marginTop: 10,
+              padding: "10px 12px",
+              borderRadius: 12,
+              border: "1px solid #ddd",
+              background: "#fff",
+              fontWeight: 950,
+              cursor: msBusy ? "not-allowed" : "pointer",
+              opacity: msBusy ? 0.6 : 1,
+            }}
+          >
+            Master Save Album…
+          </button>
+        ) : (
+          <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <button
+              type="button"
+              onClick={masterSaveAlbum}
+              disabled={msBusy}
+              style={{
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid #ddd",
+                background: "#fff",
+                fontWeight: 950,
+                cursor: msBusy ? "not-allowed" : "pointer",
+                opacity: msBusy ? 0.6 : 1,
+              }}
+            >
+              Confirm Master Save
+            </button>
+            <button
+              type="button"
+              onClick={() => setMsArmed(false)}
+              disabled={msBusy}
+              style={{
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid #ddd",
+                background: "#fff",
+                fontWeight: 900,
+                cursor: msBusy ? "not-allowed" : "pointer",
+                opacity: msBusy ? 0.6 : 1,
+              }}
+            >
+              Cancel
+            </button>
+            <div style={{ fontSize: 12, opacity: 0.7 }}>
+              Writes album.masterSave snapshot (playlist/meta/cover/locks/buildStamp).
+            </div>
+          </div>
+        )}
+
+        <div style={{ marginTop: 10, fontFamily: "monospace", fontSize: 12, opacity: 0.85 }}>
+          stored:{" "}
+          {project?.album?.masterSave?.savedAt ? `album.masterSave.savedAt=${project.album.masterSave.savedAt}` : "—"}
+        </div>
       </div>
     </div>
   );
