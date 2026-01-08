@@ -1,4 +1,3 @@
-// src/components/SideNav.jsx
 import React, { useMemo } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 
@@ -13,20 +12,19 @@ const linkStyle = ({ isActive }) => ({
 });
 
 function getActiveProjectIdFromPath(pathname) {
-  // Only infer projectId from minisite routes
-  const p = String(pathname || "");
-  const m = p.match(/^\/minisite\/([^/]+)\//);
-  if (m?.[1]) return m[1];
-  return null;
+  const m = String(pathname || "").match(/^\/minisite\/([^/]+)(\/|$)/);
+  return m?.[1] || null;
 }
 
 export default function SideNav() {
   const { pathname, search } = useLocation();
-  const currentId = useMemo(() => getActiveProjectIdFromPath(pathname), [pathname]);
 
-  // Preserve querystring between minisite pages (token, etc.)
-  const qs = search || "?token=demo";
-  const minisiteId = currentId || "demo";
+  const projectId = useMemo(
+    () => getActiveProjectIdFromPath(pathname),
+    [pathname]
+  );
+
+  const qs = search || "";
 
   return (
     <aside
@@ -38,13 +36,13 @@ export default function SideNav() {
         padding: 16,
       }}
     >
-      <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 8 }}>INTERNAL</div>
+      <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 8 }}>
+        INTERNAL
+      </div>
 
       <NavLink to="/producer" style={linkStyle}>
         Producer
       </NavLink>
-
-      {/* Projects + Project links removed for rollout stability */}
 
       <NavLink to="/admin" style={linkStyle}>
         Admin
@@ -55,28 +53,36 @@ export default function SideNav() {
       </NavLink>
 
       <div style={{ fontSize: 11, opacity: 0.6, margin: "16px 0 8px" }}>
-        MINI SITE ({minisiteId})
+        MINI SITE
       </div>
 
-      <NavLink to={`/minisite/${minisiteId}/catalog${qs}`} style={linkStyle}>
-        Catalog
-      </NavLink>
+      {!projectId ? (
+        <div style={{ fontSize: 12, opacity: 0.5 }}>
+          Select a project to enable mini-site
+        </div>
+      ) : (
+        <>
+          <NavLink to={`/minisite/${projectId}/catalog${qs}`} style={linkStyle}>
+            Catalog
+          </NavLink>
 
-      <NavLink to={`/minisite/${minisiteId}/album${qs}`} style={linkStyle}>
-        Album
-      </NavLink>
+          <NavLink to={`/minisite/${projectId}/album${qs}`} style={linkStyle}>
+            Album
+          </NavLink>
 
-      <NavLink to={`/minisite/${minisiteId}/nft-mix${qs}`} style={linkStyle}>
-        NFT Mix
-      </NavLink>
+          <NavLink to={`/minisite/${projectId}/nft-mix${qs}`} style={linkStyle}>
+            NFT Mix
+          </NavLink>
 
-      <NavLink to={`/minisite/${minisiteId}/songs${qs}`} style={linkStyle}>
-        Songs
-      </NavLink>
+          <NavLink to={`/minisite/${projectId}/songs${qs}`} style={linkStyle}>
+            Songs
+          </NavLink>
 
-      <NavLink to={`/minisite/${minisiteId}/meta${qs}`} style={linkStyle}>
-        Meta
-      </NavLink>
+          <NavLink to={`/minisite/${projectId}/meta${qs}`} style={linkStyle}>
+            Meta
+          </NavLink>
+        </>
+      )}
     </aside>
   );
 }
