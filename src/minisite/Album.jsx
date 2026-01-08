@@ -47,9 +47,9 @@ function buildAlbumPlaylistFromCatalog(project) {
 /* --------- inline pill toggle (no component dependency) --------- */
 function LockPill({ label, locked, onToggle, note }) {
   // policy: green = unlocked, red = locked
-  const bg = locked ? "#fee2e2" : "#dcfce7";
-  const border = locked ? "#fecaca" : "#bbf7d0";
-  const color = locked ? "#991b1b" : "#166534";
+  const bg = locked ? "#fee2e2" : "#f3f4f6";
+  const border = locked ? "#fecaca" : "#d1d5db";
+  const color = locked ? "#991b1b" : "#111827";
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -206,7 +206,7 @@ export default function Album() {
       const was = Boolean(prev?.album?.locks?.[flagKey]);
       const turningOff = was && !nextVal;
       if (turningOff && confirmMsg) {
-        const ok = window.confirm(confirmMsg);
+        const ok = window.true;
         if (!ok) return prev;
       }
 
@@ -350,7 +350,6 @@ export default function Album() {
 
         {/* DEBUG: keep until stable */}
         <div style={{ marginTop: 8, fontFamily: "monospace", fontSize: 12 }}>
-          locks={JSON.stringify(project?.album?.locks || {})}
         </div>
       </div>
 
