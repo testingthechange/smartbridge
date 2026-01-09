@@ -723,18 +723,3 @@ export default function Album() {
       <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid #ddd" }}>
         <div style={{ fontSize: 18, fontWeight: 950 }}>Master Save</div>
 
-        {msMsg ? <div style={{ marginTop: 8, fontFamily: "monospace", fontSize: 12 }}>{msMsg}</div> : null}
-
-        {!msArmed ? (
-          <button
-            type="button"
-            onClick={() => setMsArmed(true)}
-            disabled={msBusy}
-            style={{
-              marginTop: 10,
-              padding: "10px 12px",
-              borderRadius: 12,
-              border: "1px solid #ddd",
-              background: "#fff",
-              fontWeight: 950,
-              cursor: msBusy ? "not-allowed" : "pointer",
