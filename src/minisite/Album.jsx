@@ -713,13 +713,161 @@ export default function Album() {
               Writes album.masterSave snapshot (playlist/meta/cover/locks/buildStamp).
             </div>
           </div>
-        )}
+        {/* Master Save (single) */}
+        <div style={{ border: "1px solid #e5e7eb", borderRadius: 14, padding: 14, background: "#fff" }}>
+          <div style={{ fontSize: 18, fontWeight: 950 }}>Master Save</div>
 
-        <div style={{ marginTop: 10, fontFamily: "monospace", fontSize: 12, opacity: 0.85 }}>
-          stored:{" "}
-          {project?.album?.masterSave?.savedAt ? `album.masterSave.savedAt=${project.album.masterSave.savedAt}` : "—"}
+          <div style={{ marginTop: 8, fontFamily: "monospace", fontSize: 12, opacity: 0.9 }}>
+            {msSavedAt ? `Album Master Saved @ ${msSavedAt}` : "—"}
+          </div>
+
+          <div style={{ marginTop: 10, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            {!msArmed ? (
+              <button
+                type="button"
+                onClick={() => setMsArmed(true)}
+                disabled={msBusy}
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 14,
+                  border: "1px solid #ddd",
+                  background: "#fff",
+                  fontWeight: 950,
+                  cursor: msBusy ? "not-allowed" : "pointer",
+                  opacity: msBusy ? 0.6 : 1,
+                }}
+              >
+                Master Save
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={masterSaveAlbum}
+                  disabled={msBusy}
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 14,
+                    border: "1px solid #ddd",
+                    background: "#fff",
+                    fontWeight: 950,
+                    cursor: msBusy ? "not-allowed" : "pointer",
+                    opacity: msBusy ? 0.6 : 1,
+                  }}
+                >
+                  Confirm Master Save
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMsArmed(false)}
+                  disabled={msBusy}
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 14,
+                    border: "1px solid #ddd",
+                    background: "#fff",
+                    fontWeight: 950,
+                    cursor: msBusy ? "not-allowed" : "pointer",
+                    opacity: msBusy ? 0.6 : 1,
+                  }}
+                >
+                  Cancel
+                </button>
+              </>
+            )}
+          </div>
+
+          {msMsg ? <div style={{ marginTop: 10, fontWeight: 900 }}>{msMsg}</div> : null}
+
+          <div style={{ marginTop: 10, fontFamily: "monospace", fontSize: 12, opacity: 0.85 }}>
+            stored: {msSnapshotKey ? `album.masterSave.snapshotKey=${msSnapshotKey}` : "—"}
+            {msSavedAt ? ` | album.masterSave.savedAt=${msSavedAt}` : ""}
+          </div>
+        </div>
+
+        {/* Publish */}
+        <div style={{ border: "1px solid #e5e7eb", borderRadius: 14, padding: 14, background: "#fff" }}>
+          <div style={{ fontSize: 18, fontWeight: 950 }}>Publish</div>
+
+          <div style={{ marginTop: 10, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            {!pubArmed ? (
+              <button
+                type="button"
+                onClick={() => setPubArmed(true)}
+                disabled={pubBusy}
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 14,
+                  border: "1px solid #ddd",
+                  background: "#fff",
+                  fontWeight: 950,
+                  cursor: pubBusy ? "not-allowed" : "pointer",
+                  opacity: pubBusy ? 0.6 : 1,
+                }}
+              >
+                Publish
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={publishMiniSite}
+                  disabled={pubBusy}
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 14,
+                    border: "1px solid #ddd",
+                    background: "#fff",
+                    fontWeight: 950,
+                    cursor: pubBusy ? "not-allowed" : "pointer",
+                    opacity: pubBusy ? 0.6 : 1,
+                  }}
+                >
+                  Confirm Publish
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPubArmed(false)}
+                  disabled={pubBusy}
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 14,
+                    border: "1px solid #ddd",
+                    background: "#fff",
+                    fontWeight: 950,
+                    cursor: pubBusy ? "not-allowed" : "pointer",
+                    opacity: pubBusy ? 0.6 : 1,
+                  }}
+                >
+                  Cancel
+                </button>
+              </>
+            )}
+          </div>
+
+          {pubMsg ? <div style={{ marginTop: 10, fontWeight: 900 }}>{pubMsg}</div> : null}
+
+          <div style={{ marginTop: 10, fontFamily: "monospace", fontSize: 12, opacity: 0.85 }}>
+            {pub?.publishedAt ? (
+              <>
+                Published At: {pub.publishedAt}
+                <br />
+                Share ID: {pub.shareId || "—"}
+                <br />
+                Manifest Key: {pub.manifestKey || "—"}
+                <br />
+                Public URL: {pub.publicUrl || "—"}
+                <br />
+                Snapshot Key: {pub.snapshotKey || "—"}
+              </>
+            ) : (
+              "—"
+            )}
+          </div>
         </div>
       </div>
-      <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid #ddd" }}>
-        <div style={{ fontSize: 18, fontWeight: 950 }}>Master Save</div>
+    </div>
+  </div>
+);
+}
 
