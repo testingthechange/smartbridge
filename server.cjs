@@ -1,6 +1,7 @@
 // server.cjs
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 const { Pool } = require("pg");
 const multer = require("multer");
 const upload = multer({ storage: multer.memoryStorage() });
@@ -39,6 +40,11 @@ const pool = new Pool({
 // ---------- ROOT ----------
 app.get("/", (req, res) => {
   res.status(200).send("album-backend OK");
+});
+
+// ---------- PROBE: confirms deploy + routing ----------
+app.get("/api/__routes_probe", (req, res) => {
+  res.json({ ok: true, service: "album-backend", ts: new Date().toISOString() });
 });
 
 // ---------- HEALTH ----------
@@ -134,7 +140,9 @@ app.post("/api/master-save", async (req, res) => {
   try {
     const { projectId, project } = req.body || {};
     if (!projectId || !project) {
-      return res.status(400).json({ ok: false, error: "Missing projectId or project" });
+      return res
+        .status(400)
+        .json({ ok: false, error: "Missing projectId or project" });
     }
 
     const now = new Date().toISOString();
@@ -175,7 +183,9 @@ app.get("/api/master-save/latest/:projectId", async (req, res) => {
       String(latest?.snapshotKey || "").trim();
 
     if (!snapKey) {
-      return res.status(404).json({ ok: false, error: "NO_LATEST_SNAPSHOT_KEY", latestKey });
+      return res
+        .status(404)
+        .json({ ok: false, error: "NO_LATEST_SNAPSHOT_KEY", latestKey });
     }
 
     const snapshot = await getJson(snapKey);
@@ -185,6 +195,45 @@ app.get("/api/master-save/latest/:projectId", async (req, res) => {
     console.error("master-save latest error:", err);
     res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
+});
+
+// ---------- PUBLISH: temporary minimal handler to kill 404 (wire real logic later) ----------
+app.post("/api/publish-minisite", (req, res) => {
+  const { projectId, snapshotKey } = req.body || {};
+  if (!projectId || !snapshotKey) {
+    return res
+      .status(400)
+      .json({ ok: false, error: "projectId and snapshotKey are required" });
+  }
+  return res.json({
+    ok: true,
+    projectId,
+    snapshotKey,
+    note: "publish-minisite reached",
+  });
+});
+
+// ---------- STATIC FRONTEND (Vite build) ----------
+const distDir = path.join(__dirname, "dist");
+app.use(
+  express.static(distDir, {
+    etag: true,
+    maxAge: "1y",
+    setHeaders: (res, filePath) => {
+      // Critical: never cache the HTML shell or deploys won't show up
+      if (filePath.endsWith("index.html")) {
+        res.setHeader("Cache-Control", "no-store");
+      }
+    },
+  })
+);
+
+// SPA fallback (must be after API routes)
+app.get("*", (req, res) => {
+  if (req.path.startsWith("/api/")) {
+    return res.status(404).json({ ok: false, error: "NO_ROUTE" });
+  }
+  return res.sendFile(path.join(distDir, "index.html"));
 });
 
 // ---------- START ----------
