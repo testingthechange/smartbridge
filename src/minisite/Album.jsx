@@ -717,25 +717,6 @@ export default function Album() {
         </div>
       </>
     )}
-  </div>
-
-  {msMsg ? <div style={{ marginTop: 10, fontWeight: 900 }}>{msMsg}</div> : null}
-
-  <div style={{ marginTop: 10, fontFamily: "monospace", fontSize: 12, opacity: 0.85 }}>
-    stored: {msSnapshotKey ? `album.masterSave.snapshotKey=${msSnapshotKey}` : "—"}
-    {msSavedAt ? ` | album.masterSave.savedAt=${msSavedAt}` : ""}
-  </div>
-</div>
-
-          </div>
-
-          {msMsg ? <div style={{ marginTop: 10, fontWeight: 900 }}>{msMsg}</div> : null}
-
-          <div style={{ marginTop: 10, fontFamily: "monospace", fontSize: 12, opacity: 0.85 }}>
-            stored: {msSnapshotKey ? `album.masterSave.snapshotKey=${msSnapshotKey}` : "—"}
-            {msSavedAt ? ` | album.masterSave.savedAt=${msSavedAt}` : ""}
-          </div>
-        </div>
 
         {/* Publish */}
         <div style={{ border: "1px solid #e5e7eb", borderRadius: 14, padding: 14, background: "#fff" }}>
