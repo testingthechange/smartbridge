@@ -633,3 +633,5 @@ function slotBadge() {
     whiteSpace: "nowrap",
   };
 }
+/* BUILD STAMP — MUST APPEAR IN UI */
+const META_BUILD_STAMP = "STAMP-META-SMARTBRIDGE2-2026-01-10-B";
