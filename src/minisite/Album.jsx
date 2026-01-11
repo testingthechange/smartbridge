@@ -5,7 +5,7 @@ import { useLocation, useParams } from "react-router-dom";
 import { loadProject, saveProject, fmtTime, once, fetchPlaybackUrl } from "./catalog/catalogCore.js";
 
 /* BUILD STAMP — MUST APPEAR IN UI */
-const ALBUM_BUILD_STAMP = "STAMP-ALBUM-NOPOPUPS-LOCKSWITCH-LOCALUI-2026-01-08";
+const ALBUM_BUILD_STAMP = "STAMP-ALBUM-NOPOPUPS-LOCKSWITCH-LOCALUI-2026-01-10-MASTER-SAVE-BACKEND-A";
 
 /* ---- helpers ---- */
 function normalizeBase(s) {
@@ -118,10 +118,12 @@ export default function Album() {
     return (sp.get("projectId") || "").trim();
   }, [params, location.search]);
 
-  const API_BASE = useMemo(
-    () => normalizeBase(import.meta.env.VITE_API_BASE || import.meta.env.VITE_BACKEND_URL || ""),
-    []
-  );
+  // Use your backend env (preferred). Fall back to old name if you still have it.
+  const API_BASE = useMemo(() => {
+    const a = normalizeBase(import.meta.env.VITE_BACKEND_URL);
+    const b = normalizeBase(import.meta.env.VITE_API_BASE);
+    return a || b || "";
+  }, []);
 
   const [project, setProject] = useState(() => (projectId ? loadProject(projectId) : null));
   const [busy, setBusy] = useState("");
@@ -142,7 +144,7 @@ export default function Album() {
   const [msBusy, setMsBusy] = useState(false);
   const [msMsg, setMsMsg] = useState("");
 
-  // Publish (no popups)
+  // Publish
   const [pubArmed, setPubArmed] = useState(false);
   const [pubBusy, setPubBusy] = useState(false);
   const [pubMsg, setPubMsg] = useState("");
@@ -224,6 +226,7 @@ export default function Album() {
       setProject(next);
     } else {
       setProject(stored);
+      setPub(stored?.album?.publish || null);
     }
   }, [projectId]);
 
@@ -235,7 +238,6 @@ export default function Album() {
       metaComplete: parseLock(l.metaComplete),
       coverComplete: parseLock(l.coverComplete),
     });
-    setPub(project?.album?.publish || null);
   }, [project]);
 
   // audio events
@@ -322,13 +324,14 @@ export default function Album() {
 
       // Snapshot playlist/meta/cover regardless of locks
       const snapshotPlaylist = playlistLocked
-        ? (Array.isArray(current?.album?.songs) ? current.album.songs : [])
+        ? Array.isArray(current?.album?.songs)
+          ? current.album.songs
+          : []
         : buildAlbumPlaylistFromCatalog(current);
 
-      const savedAt = new Date().toISOString();
       const snapshot = {
         buildStamp: ALBUM_BUILD_STAMP,
-        savedAt,
+        savedAt: new Date().toISOString(),
         projectId,
         locks: {
           playlistComplete: Boolean(locksUI.playlistComplete),
@@ -340,41 +343,62 @@ export default function Album() {
         cover: { ...(current?.album?.cover || {}) },
       };
 
+      // local save first
       const nextLocal = {
         ...current,
         album: {
           ...(current?.album || {}),
           masterSave: snapshot,
         },
-        updatedAt: savedAt,
+        updatedAt: new Date().toISOString(),
       };
-
-      // Save locally first so UI never blanks
       saveProject(projectId, nextLocal);
       setProject(nextLocal);
 
-      // Also push to backend master-save (so publish has a real snapshotKey)
-      if (API_BASE) {
-        const r = await fetch(`${API_BASE}/api/master-save`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ projectId, project: nextLocal }),
-        });
-        const j = await r.json().catch(() => ({}));
-        if (!r.ok || !j?.ok) throw new Error(j?.error || `HTTP ${r.status}`);
-
-        const nextWithKey = {
-          ...nextLocal,
-          album: {
-            ...(nextLocal.album || {}),
-            masterSave: { ...(nextLocal.album?.masterSave || {}), snapshotKey: String(j.snapshotKey || "") },
-          },
-        };
-        saveProject(projectId, nextWithKey);
-        setProject(nextWithKey);
+      // backend save (authoritative)
+      if (!API_BASE) {
+        setMsMsg(`Album Master Saved locally @ ${snapshot.savedAt} (no API base set)`);
+        setMsArmed(false);
+        return;
       }
 
-      setMsMsg(`Album Master Saved @ ${savedAt}`);
+      const r1 = await fetch(`${API_BASE}/api/master-save/latest/${projectId}`);
+      const j1 = await r1.json().catch(() => ({}));
+      if (!r1.ok || !j1?.ok) throw new Error(j1?.error || `HTTP ${r1.status}`);
+
+      const currentProject = j1?.snapshot?.project || j1?.snapshot?.data || {};
+
+      const nextProject = {
+        ...currentProject,
+        album: {
+          ...(currentProject.album || {}),
+          ...(nextLocal.album || {}),
+          masterSave: snapshot,
+        },
+      };
+
+      const r2 = await fetch(`${API_BASE}/api/master-save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, project: nextProject }),
+      });
+      const j2 = await r2.json().catch(() => ({}));
+      if (!r2.ok || !j2?.ok) throw new Error(j2?.error || `HTTP ${r2.status}`);
+
+      // keep snapshotKey for publish
+      const snapshotKey = String(j2?.snapshotKey || "");
+      const nextWithKey = {
+        ...nextLocal,
+        album: {
+          ...(nextLocal.album || {}),
+          masterSave: { ...snapshot, snapshotKey },
+        },
+        updatedAt: new Date().toISOString(),
+      };
+      saveProject(projectId, nextWithKey);
+      setProject(nextWithKey);
+
+      setMsMsg(`Album Master Saved @ ${snapshot.savedAt}`);
       setMsArmed(false);
     } catch (e) {
       setErr(e?.message || "Master Save failed");
@@ -390,12 +414,9 @@ export default function Album() {
     setErr("");
 
     try {
-      if (!API_BASE) throw new Error("Missing VITE_API_BASE / VITE_BACKEND_URL");
-      const current = rereadProject() || project;
-      if (!current) throw new Error("No project loaded");
-
-      const snapshotKey = String(current?.album?.masterSave?.snapshotKey || "").trim();
-      if (!snapshotKey) throw new Error("No snapshotKey. Run Album Master Save first (must hit backend).");
+      if (!API_BASE) throw new Error("Missing API base (VITE_BACKEND_URL / VITE_API_BASE)");
+      const snapshotKey = String(project?.album?.masterSave?.snapshotKey || "").trim();
+      if (!snapshotKey) throw new Error("Missing snapshotKey. Run Album Master Save again (backend) first.");
 
       const r = await fetch(`${API_BASE}/api/publish-minisite`, {
         method: "POST",
@@ -405,22 +426,23 @@ export default function Album() {
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j?.ok) throw new Error(j?.error || `HTTP ${r.status}`);
 
-      const publishedAt = new Date().toISOString();
-      const nextPub = { ...j, publishedAt };
-      setPub(nextPub);
-
-      const nextLocal = {
-        ...current,
-        album: {
-          ...(current?.album || {}),
-          publish: nextPub,
-        },
-        updatedAt: publishedAt,
-      };
-      saveProject(projectId, nextLocal);
-      setProject(nextLocal);
-
+      setPub(j);
       setPubMsg("Publish complete.");
+
+      const current = rereadProject() || project;
+      if (current) {
+        const next = {
+          ...current,
+          album: {
+            ...(current.album || {}),
+            publish: j,
+          },
+          updatedAt: new Date().toISOString(),
+        };
+        saveProject(projectId, next);
+        setProject(next);
+      }
+
       setPubArmed(false);
     } catch (e) {
       setErr(e?.message || "Publish failed");
@@ -521,7 +543,7 @@ export default function Album() {
   async function playIndex(idx) {
     setErr("");
     if (!API_BASE) {
-      setErr("Missing VITE_API_BASE / VITE_BACKEND_URL");
+      setErr("Missing VITE_BACKEND_URL / VITE_API_BASE");
       return;
     }
 
@@ -562,7 +584,9 @@ export default function Album() {
   const metaNote = String(project?.album?.meta?.note || "");
   const coverKey = String(project?.album?.cover?.s3Key || "");
   const coverPreview = String(project?.album?.cover?.localPreviewUrl || "");
-  const msSavedAt = String(project?.album?.masterSave?.savedAt || ""); // FIX: prevents msSavedAt crash
+
+  // FIX: no global var, always defined
+  const msSavedAt = String(project?.album?.masterSave?.savedAt || "");
 
   return (
     <div style={{ maxWidth: 1100, padding: 18 }}>
@@ -575,6 +599,7 @@ export default function Album() {
 
       {busy ? <div style={{ marginTop: 10, fontWeight: 900 }}>{busy}</div> : null}
       {err ? <div style={{ marginTop: 10, color: "crimson", fontWeight: 900 }}>{err}</div> : null}
+      {msMsg ? <div style={{ marginTop: 10, fontWeight: 900 }}>{msMsg}</div> : null}
 
       <div style={{ marginTop: 14, display: "grid", gap: 10 }}>
         <LockPill
@@ -736,7 +761,7 @@ export default function Album() {
         ) : null}
       </div>
 
-      {/* ===================== MASTER SAVE + PUBLISH ===================== */}
+      {/* ===================== MASTER SAVE (SINGLE) ===================== */}
       <div style={{ marginTop: 22, paddingTop: 14, borderTop: "1px solid #ddd" }}>
         <div style={{ fontSize: 20, fontWeight: 950 }}>Master Save</div>
 
@@ -797,14 +822,16 @@ export default function Album() {
               >
                 Cancel
               </button>
+
+              <div style={{ fontSize: 14, opacity: 0.8 }}>
+                Writes album.masterSave snapshot (playlist/meta/cover/locks/buildStamp) + stores snapshotKey.
+              </div>
             </>
           )}
         </div>
 
-        {msMsg ? <div style={{ marginTop: 10, fontWeight: 900 }}>{msMsg}</div> : null}
-
         {/* Publish */}
-        <div style={{ marginTop: 16, border: "1px solid #e5e7eb", borderRadius: 14, padding: 14, background: "#fff" }}>
+        <div style={{ marginTop: 14, border: "1px solid #e5e7eb", borderRadius: 14, padding: 14, background: "#fff" }}>
           <div style={{ fontSize: 18, fontWeight: 950 }}>Publish</div>
 
           <div style={{ marginTop: 10, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
@@ -887,9 +914,3 @@ export default function Album() {
     </div>
   );
 }
-
-/*
-NOTE: You said you "do not see album view file".
-This Album.jsx does not import AlbumView. If you have AlbumView usage elsewhere,
-it’s not required for this file to render and not blank.
-*/
