@@ -615,102 +615,96 @@ export default function Album() {
   }, [playlist]);
 
   // Master Save (2-tier confirm + final alert)
-  async function masterSaveAlbum() {
-    if (msBusy) return;
-    setErr("");
+async function masterSaveAlbum() {
+  if (msBusy) return;
 
-    if (!projectId) {
-      setErr("Missing projectId");
+  // 2-step confirmation
+  const first = window.confirm("Are you sure you want to Master Save Album?\n\nThis writes the Album snapshot.");
+  if (!first) return;
+
+  const second = window.confirm("Last chance.\n\nDouble-check everything before saving.");
+  if (!second) return;
+
+  setMsBusy(true);
+  setMsMsg("");
+  setErr("");
+
+  try {
+    const current = rereadProject() || project;
+    if (!current) {
+      setMsMsg("No project loaded.");
       return;
     }
-    if (!API_BASE) {
-      setErr("Missing VITE_BACKEND_URL (or VITE_API_BASE)");
-      return;
-    }
 
-    const first = window.confirm("Are you sure you want to Master Save Album?");
-    if (!first) return;
+    const nowIso = new Date().toISOString();
 
-    const second = window.confirm("Last chance. Double check before saving.");
-    if (!second) return;
+    // Snapshot playlist: if playlist is locked, use album.songs; else derive from catalog right now.
+    const snapshotPlaylist = playlistLocked
+      ? Array.isArray(current?.album?.songs)
+        ? current.album.songs
+        : []
+      : buildAlbumPlaylistFromCatalog(current);
 
-    setMsBusy(true);
+    // Album meta fields (keep existing note if you still use it elsewhere)
+    const albumMeta = {
+      albumTitle: String(current?.album?.meta?.albumTitle || ""),
+      artistName: String(current?.album?.meta?.artistName || ""),
+      releaseDate: String(current?.album?.meta?.releaseDate || ""),
+      note: String(current?.album?.meta?.note || ""),
+    };
 
-    try {
-      const currentLocal = rereadProject() || project;
-      if (!currentLocal) throw new Error("No project loaded.");
+    // Cover payload
+    const albumCover = {
+      s3Key: String(current?.album?.cover?.s3Key || ""),
+      localPreviewUrl: String(current?.album?.cover?.localPreviewUrl || ""),
+    };
 
-      const snapshotPlaylist = playlistLocked
-        ? (Array.isArray(currentLocal?.album?.songs) ? currentLocal.album.songs : [])
-        : buildDerivedPlaylistFromCatalog(currentLocal, orderIds);
+    // Total time (best-effort; if you don’t store per-track seconds yet, keep 0)
+    const albumTotalTimeSeconds = snapshotPlaylist.reduce((sum, t) => {
+      const v = Number(t?.durationSeconds);
+      return sum + (Number.isFinite(v) ? v : 0);
+    }, 0);
 
-      const savedAt = new Date().toISOString();
+    // REQUIRED snapshot shape
+    const snapshot = {
+      buildStamp: ALBUM_BUILD_STAMP,
+      savedAt: nowIso,
+      projectId,
+      locks: {
+        playlistComplete: Boolean(current?.album?.locks?.playlistComplete),
+        metaComplete: Boolean(current?.album?.locks?.metaComplete),
+        coverComplete: Boolean(current?.album?.locks?.coverComplete),
+        // If you added a separate cover-upload lock, include it here too:
+        coverUploadComplete: Boolean(current?.album?.locks?.coverUploadComplete),
+      },
+      playlist: snapshotPlaylist,
+      meta: albumMeta,
+      cover: albumCover,
+      albumTotalTimeSeconds,
+    };
 
-      // local snapshot inside album
-      const localAlbumMasterSave = {
-        buildStamp: ALBUM_BUILD_STAMP,
-        savedAt,
-        projectId,
-        locks: {
-          playlistComplete: Boolean(locksUI.playlistComplete),
-          metaComplete: Boolean(locksUI.metaComplete),
-          coverComplete: Boolean(locksUI.coverComplete),
-        },
-        playlistOrder: Array.isArray(orderIds) ? [...orderIds] : [],
-        playlist: snapshotPlaylist,
-        meta: { ...(currentLocal?.album?.meta || {}) },
-        cover: { ...(currentLocal?.album?.cover || {}) },
-      };
+    const next = {
+      ...current,
+      album: {
+        ...(current?.album || {}),
+        masterSave: snapshot,
+      },
+      updatedAt: nowIso,
+    };
 
-      const localNext = {
-        ...currentLocal,
-        album: {
-          ...(currentLocal?.album || {}),
-          playlistOrder: Array.isArray(orderIds) ? [...orderIds] : [],
-          masterSave: localAlbumMasterSave,
-        },
-        updatedAt: savedAt,
-      };
+    saveProject(projectId, next);
+    setProject(next);
 
-      saveProject(projectId, localNext);
-      setProject(localNext);
-      setMsSavedAt(savedAt);
+    setMsMsg(`Album Master Saved @ ${nowIso}`);
+    setMsArmed(false);
 
-      // backend master save: pull latest snapshot, patch album, push
-      const r1 = await fetch(`${API_BASE}/api/master-save/latest/${encodeURIComponent(projectId)}`);
-      const j1 = await r1.json().catch(() => ({}));
-      if (!r1.ok || !j1?.ok) throw new Error(j1?.error || `HTTP ${r1.status}`);
-
-      const currentSnapProject = j1?.snapshot?.project || j1?.snapshot?.data || j1?.snapshot?.projectData || {};
-
-      const nextProjectForBackend = {
-        ...currentSnapProject,
-        album: {
-          ...(currentSnapProject?.album || {}),
-          ...localNext.album,
-          // ensure we store playlistOrder even if playlist is derived
-          playlistOrder: Array.isArray(orderIds) ? [...orderIds] : [],
-          // when playlist locked, also store album.songs snapshot
-          songs: playlistLocked ? snapshotPlaylist : Array.isArray(currentSnapProject?.album?.songs) ? currentSnapProject.album.songs : [],
-        },
-        updatedAt: savedAt,
-      };
-
-      const r2 = await fetch(`${API_BASE}/api/master-save`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId, project: nextProjectForBackend }),
-      });
-      const j2 = await r2.json().catch(() => ({}));
-      if (!r2.ok || !j2?.ok) throw new Error(j2?.error || `HTTP ${r2.status}`);
-
-      window.alert("Album Master Save complete.");
-    } catch (e) {
-      setErr(e?.message || "Master Save failed");
-    } finally {
-      setMsBusy(false);
-    }
+    window.alert("Album Master Save complete.\n\nSnapshot written to album.masterSave.");
+  } catch (e) {
+    setErr(e?.message || "Master Save failed");
+  } finally {
+    setMsBusy(false);
   }
+}
 
   if (!projectId) return <div style={{ padding: 24 }}>Missing projectId</div>;
   if (!project) return <div style={{ padding: 24 }}>Loading Album…</div>;
@@ -952,7 +946,7 @@ export default function Album() {
           <div>
             <div style={{ fontSize: 18, fontWeight: 950 }}>Master Save</div>
             <div style={{ marginTop: 6, fontFamily: styles.mono, fontSize: 12, opacity: 0.8 }}>
-              {msSavedAt ? `Album Master Saved @ ${msSavedAt}` : "—"}
+              {project?.album?.masterSave?.savedAt ? `Album Master Saved @ ${project.album.masterSave.savedAt}` : "—"}
             </div>
           </div>
 
