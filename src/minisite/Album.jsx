@@ -755,7 +755,6 @@ async function masterSaveAlbum() {
   } finally {
     setMsBusy(false);
   }
-}
 
   if (!projectId) return <div style={{ padding: 24 }}>Missing projectId</div>;
   if (!project) return <div style={{ padding: 24 }}>Loading Album…</div>;
@@ -1014,13 +1013,27 @@ Album Master Saved @ 2026-01-11T06:08:07.086            </div>
       </div>
     </div>
   );
-}
+
 
 /* ---------------- styles ---------------- */
 const styles = {
   mono: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
-  card: { background: "#ffffff", border: "1px solid #e5e7eb", borderRadius: 14, padding: 14 },
-  fieldLabel: { fontSize: 11, fontWeight: 950, opacity: 0.7, textTransform: "uppercase", marginBottom: 6 },
+
+  card: {
+    background: "#ffffff",
+    border: "1px solid #e5e7eb",
+    borderRadius: 14,
+    padding: 14,
+  },
+
+  fieldLabel: {
+    fontSize: 11,
+    fontWeight: 950,
+    opacity: 0.7,
+    textTransform: "uppercase",
+    marginBottom: 6,
+  },
+
   input: {
     width: "100%",
     padding: "10px 12px",
@@ -1030,6 +1043,7 @@ const styles = {
     fontSize: 13,
     outline: "none",
   },
+
   inputDisabled: {
     width: "100%",
     padding: "10px 12px",
@@ -1041,6 +1055,7 @@ const styles = {
     outline: "none",
     cursor: "not-allowed",
   },
+
   softBtn: {
     padding: "8px 10px",
     borderRadius: 12,
@@ -1050,6 +1065,7 @@ const styles = {
     fontWeight: 950,
     cursor: "pointer",
   },
+
   softBtnDisabled: {
     padding: "8px 10px",
     borderRadius: 12,
@@ -1060,6 +1076,7 @@ const styles = {
     fontWeight: 950,
     cursor: "not-allowed",
   },
+
   primaryBtn: {
     padding: "10px 14px",
     borderRadius: 14,
@@ -1070,6 +1087,7 @@ const styles = {
     fontWeight: 950,
     cursor: "pointer",
   },
+
   primaryBtnDisabled: {
     padding: "10px 14px",
     borderRadius: 14,
