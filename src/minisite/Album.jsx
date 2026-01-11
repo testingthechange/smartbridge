@@ -614,7 +614,7 @@ export default function Album() {
     return playlist.reduce((acc, t) => acc + (Number(t?.durationSeconds || 0) || 0), 0);
   }, [playlist]);
 
-  // Master Save (2-tier confirm + final alert)
+ // Master Save (2-tier confirm + final alert)
 async function masterSaveAlbum() {
   if (msBusy) return;
 
@@ -628,6 +628,57 @@ async function masterSaveAlbum() {
   setMsBusy(true);
   setMsMsg("");
   setErr("");
+
+  try {
+    const current = rereadProject() || project;
+    if (!current) {
+      setMsMsg("No project loaded.");
+      return;
+    }
+
+    const snapshotPlaylist = playlistLocked
+      ? (Array.isArray(current?.album?.songs) ? current.album.songs : [])
+      : buildAlbumPlaylistFromCatalog(current);
+
+    const nowIso = new Date().toISOString();
+
+    const snapshot = {
+      buildStamp: ALBUM_BUILD_STAMP,
+      savedAt: nowIso,
+      projectId,
+      locks: {
+        playlistComplete: Boolean(locksUI.playlistComplete),
+        metaComplete: Boolean(locksUI.metaComplete),
+        coverComplete: Boolean(locksUI.coverComplete),
+      },
+      playlist: snapshotPlaylist,
+      meta: { ...(current?.album?.meta || {}) },
+      cover: { ...(current?.album?.cover || {}) },
+    };
+
+    const next = {
+      ...current,
+      album: {
+        ...(current?.album || {}),
+        masterSave: snapshot,
+      },
+      updatedAt: nowIso,
+    };
+
+    saveProject(projectId, next);
+    setProject(next);
+
+    setMsMsg(`Album Master Saved @ ${nowIso}`);
+    setMsArmed(false);
+
+    // FINAL CONFIRMATION MESSAGE
+    window.alert(`Master Save confirmed.\n\nAlbum Master Saved @ ${nowIso}`);
+  } catch (e) {
+    setErr(e?.message || "Master Save failed");
+  } finally {
+    setMsBusy(false);
+  }
+}
 
   try {
     const current = rereadProject() || project;
@@ -947,7 +998,7 @@ async function masterSaveAlbum() {
             <div style={{ fontSize: 18, fontWeight: 950 }}>Master Save</div>
             <div style={{ marginTop: 6, fontFamily: styles.mono, fontSize: 12, opacity: 0.8 }}>
               {project?.album?.masterSave?.savedAt ? `Album Master Saved @ ${project.album.masterSave.savedAt}` : "—"}
-            </div>
+Album Master Saved @ 2026-01-11T06:08:07.086            </div>
           </div>
 
           <button
