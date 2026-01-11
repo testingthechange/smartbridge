@@ -4,22 +4,12 @@ import { useLocation, useParams } from "react-router-dom";
 
 import { loadProject, saveProject, fmtTime, once, fetchPlaybackUrl } from "./catalog/catalogCore.js";
 
-/* BUILD STAMP — stored in snapshot, NOT shown in UI */
-const ALBUM_BUILD_STAMP = "STAMP-ALBUM-LAYOUT-LOCKED-2COL-PLAYER-TOP-2026-01-10-Z";
+/* BUILD STAMP — used in snapshot (NOT shown in UI) */
+const ALBUM_BUILD_STAMP = "STAMP-ALBUM-LAYOUT-LOCKED-DND-PLAYER-2026-01-11-B";
 
 /* ---- helpers ---- */
 function normalizeBase(s) {
-  return String(s || "")
-    .trim()
-    .replace(/\/+$/, "");
-}
-
-function safeName(name) {
-  return String(name || "upload").replace(/[^a-zA-Z0-9._-]+/g, "_");
-}
-
-function isoForKey() {
-  return new Date().toISOString().replace(/[:.]/g, "-");
+  return String(s || "").trim().replace(/\/+$/, "");
 }
 
 function pickCatalogTitle(s, slot) {
@@ -29,26 +19,40 @@ function pickCatalogTitle(s, slot) {
   return fromJson || fromTitle || `Song ${slot}`;
 }
 
+function buildAlbumPlaylistFromCatalog(project) {
+  const catalogSongs = Array.isArray(project?.catalog?.songs) ? project.catalog.songs : [];
+  const bySlot = new Map(
+    catalogSongs.map((s) => [
+      Number(s?.slot || s?.songNumber || 0),
+      {
+        title: pickCatalogTitle(s, Number(s?.slot || s?.songNumber || 0)),
+        s3Key: String(s?.files?.album?.s3Key || "").trim(),
+      },
+    ])
+  );
+
+  const maxSlot = Math.max(9, catalogSongs.length || 0);
+  const out = [];
+  for (let slot = 1; slot <= maxSlot; slot++) {
+    const c = bySlot.get(slot) || { title: `Song ${slot}`, s3Key: "" };
+    out.push({
+      trackNo: out.length + 1,
+      sourceSlot: slot,
+      title: c.title,
+      file: { s3Key: c.s3Key },
+    });
+  }
+  return out;
+}
+
 function parseLock(v) {
   return v === true || v === "true" || v === 1 || v === "1";
 }
 
-function moveItem(list, fromIdx, toIdx) {
-  const out = [...list];
-  const [x] = out.splice(fromIdx, 1);
-  out.splice(toIdx, 0, x);
-  return out;
+function clamp(n, a, b) {
+  return Math.max(a, Math.min(b, n));
 }
 
-function toSlotId(slot) {
-  return `slot-${Number(slot)}`;
-}
-function fromSlotId(id) {
-  const m = String(id || "").match(/^slot-(\d+)$/);
-  return m ? Number(m[1]) : null;
-}
-
-/* --------- UI bits --------- */
 function Card({ title, right, children }) {
   return (
     <div style={styles.card}>
@@ -61,37 +65,58 @@ function Card({ title, right, children }) {
   );
 }
 
-function LockPill({ locked, onToggle, disabled, label }) {
+/* --------- UI bits --------- */
+function LockPill({ label, locked, onToggle, disabled, note }) {
+  // green = UNLOCKED, red = LOCKED
   const bg = locked ? "#fee2e2" : "#dcfce7";
   const border = locked ? "#fecaca" : "#bbf7d0";
   const color = locked ? "#991b1b" : "#166534";
 
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      disabled={disabled}
+    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={disabled}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 10,
+          padding: "8px 12px",
+          borderRadius: 999,
+          border: `1px solid ${border}`,
+          background: bg,
+          color,
+          fontWeight: 950,
+          cursor: disabled ? "not-allowed" : "pointer",
+          opacity: disabled ? 0.6 : 1,
+          userSelect: "none",
+        }}
+        title="Toggle lock"
+      >
+        <span style={{ fontSize: 12, letterSpacing: 0.2, textTransform: "uppercase" }}>{label}</span>
+        <span style={{ fontFamily: styles.mono, fontSize: 12 }}>{locked ? "LOCKED" : "UNLOCKED"}</span>
+      </button>
+      {note ? <div style={{ fontSize: 12, opacity: 0.72 }}>{note}</div> : null}
+    </div>
+  );
+}
+
+function ReadonlyBox({ title, children }) {
+  return (
+    <div
       style={{
-        padding: "7px 10px",
-        borderRadius: 999,
-        border: `1px solid ${border}`,
-        background: bg,
-        color,
-        fontWeight: 950,
-        cursor: disabled ? "not-allowed" : "pointer",
-        userSelect: "none",
-        fontSize: 12,
-        letterSpacing: 0.2,
-        opacity: disabled ? 0.65 : 1,
-        display: "inline-flex",
-        gap: 8,
-        alignItems: "center",
+        marginTop: 8,
+        borderRadius: 12,
+        border: "1px solid #e5e7eb",
+        padding: 12,
+        background: "#f8fafc",
+        opacity: 0.98,
       }}
-      title="Toggle lock"
     >
-      <span style={{ textTransform: "uppercase", opacity: 0.85 }}>{label}</span>
-      <span style={{ fontFamily: styles.mono, fontSize: 12 }}>{locked ? "LOCKED" : "UNLOCKED"}</span>
-    </button>
+      <div style={{ fontSize: 12, fontWeight: 900, color: "#991b1b", marginBottom: 8 }}>{title}</div>
+      {children}
+    </div>
   );
 }
 
@@ -106,40 +131,38 @@ export default function Album() {
     return (sp.get("projectId") || "").trim();
   }, [params, location.search]);
 
-  const API_BASE = useMemo(() => {
-    return normalizeBase(import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_BASE || "");
-  }, []);
+  const API_BASE = useMemo(() => normalizeBase(import.meta.env.VITE_API_BASE), []);
 
   const [project, setProject] = useState(() => (projectId ? loadProject(projectId) : null));
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState("");
 
-  // locks (independent per-card)
+  // guard against rapid toggles / re-entry
   const [lockBusy, setLockBusy] = useState(false);
+
+  // UI-driven lock state (immediate pill color flip)
   const [locksUI, setLocksUI] = useState({
     playlistComplete: false,
     metaComplete: false,
     coverComplete: false,
   });
 
-  // playlist order (drag/drop) — stored as slot ids: ["slot-1", ...]
-  const [orderIds, setOrderIds] = useState(() => []);
-  const dragFromIdxRef = useRef(-1);
-
   // player
   const audioRef = useRef(null);
   const playSeq = useRef(0);
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [isPlaying, setIsPlaying] = useState(false);
   const [dur, setDur] = useState(0);
   const [time, setTime] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
 
-  // master save
-  const [msBusy, setMsBusy] = useState(false);
-  const [msSavedAt, setMsSavedAt] = useState("");
+  // drag state
+  const dragFromRef = useRef(null);
 
   // cover preview url management
   const lastPreviewUrlRef = useRef("");
+
+  // Master Save (2-tier confirm + final alert)
+  const [msBusy, setMsBusy] = useState(false);
 
   // init guard
   const didInitRef = useRef(false);
@@ -150,46 +173,6 @@ export default function Album() {
 
   function rereadProject() {
     return loadProject(projectId);
-  }
-
-  function getCatalogSongs(p) {
-    return Array.isArray(p?.catalog?.songs) ? p.catalog.songs : [];
-  }
-
-  function buildDerivedPlaylistFromCatalog(p, order) {
-    const catalogSongs = getCatalogSongs(p);
-    const bySlot = new Map(
-      catalogSongs.map((s) => [
-        Number(s?.slot || s?.songNumber || 0),
-        {
-          slot: Number(s?.slot || s?.songNumber || 0),
-          title: pickCatalogTitle(s, Number(s?.slot || s?.songNumber || 0)),
-          s3Key: String(s?.files?.album?.s3Key || s?.files?.catalog?.s3Key || "").trim(),
-          durationSeconds: Number(s?.durationSeconds || s?.duration || 0) || 0,
-        },
-      ])
-    );
-
-    const maxSlot = Math.max(9, catalogSongs.length || 0);
-
-    const slots = Array.isArray(order) && order.length
-      ? order
-          .map(fromSlotId)
-          .filter((n) => Number.isFinite(n) && n >= 1 && n <= maxSlot)
-      : Array.from({ length: maxSlot }, (_, i) => i + 1);
-
-    const out = [];
-    for (const slot of slots) {
-      const c = bySlot.get(slot) || { title: `Song ${slot}`, s3Key: "", durationSeconds: 0, slot };
-      out.push({
-        trackNo: out.length + 1,
-        sourceSlot: slot,
-        title: c.title,
-        durationSeconds: c.durationSeconds,
-        file: { s3Key: c.s3Key },
-      });
-    }
-    return out;
   }
 
   // INIT — create defaults only for brand-new projects; never overwrite existing ones
@@ -208,10 +191,11 @@ export default function Album() {
         catalog: { songs: [] },
         album: {
           songs: [],
-          playlistOrder: [],
+          playlistOrder: Array.from({ length: 9 }, (_, i) => i + 1),
           locks: { playlistComplete: false, metaComplete: false, coverComplete: false },
           meta: { albumTitle: "", artistName: "", releaseDate: "" },
           cover: { s3Key: "", localPreviewUrl: "" },
+          masterSave: null,
         },
       };
 
@@ -220,7 +204,9 @@ export default function Album() {
       album: {
         ...(base.album || {}),
         songs: Array.isArray(base.album?.songs) ? base.album.songs : [],
-        playlistOrder: Array.isArray(base.album?.playlistOrder) ? base.album.playlistOrder : [],
+        playlistOrder: Array.isArray(base.album?.playlistOrder)
+          ? base.album.playlistOrder
+          : Array.from({ length: 9 }, (_, i) => i + 1),
         locks: {
           playlistComplete: false,
           metaComplete: false,
@@ -234,6 +220,7 @@ export default function Album() {
           ...(base.album?.meta || {}),
         },
         cover: { s3Key: "", localPreviewUrl: "", ...(base.album?.cover || {}) },
+        masterSave: base.album?.masterSave || null,
       },
       updatedAt: new Date().toISOString(),
     };
@@ -256,21 +243,7 @@ export default function Album() {
     });
   }, [project]);
 
-  // keep orderIds synced from persisted project
-  useEffect(() => {
-    const po = Array.isArray(project?.album?.playlistOrder) ? project.album.playlistOrder : [];
-    if (po.length) {
-      setOrderIds(po);
-      return;
-    }
-
-    // fallback: build default order from catalog length (or 9)
-    const catalogSongs = getCatalogSongs(project);
-    const maxSlot = Math.max(9, catalogSongs.length || 0);
-    setOrderIds(Array.from({ length: maxSlot }, (_, i) => toSlotId(i + 1)));
-  }, [project]);
-
-  // audio events + continuous play
+  // audio events
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
@@ -279,19 +252,26 @@ export default function Album() {
     const onTimeEv = () => setTime(a.currentTime || 0);
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
+    const onEnded = () => {
+      setIsPlaying(false);
+      // continuous play: advance
+      nextTrack();
+    };
 
     a.addEventListener("loadedmetadata", onDur);
     a.addEventListener("timeupdate", onTimeEv);
     a.addEventListener("play", onPlay);
     a.addEventListener("pause", onPause);
-
+    a.addEventListener("ended", onEnded);
     return () => {
       a.removeEventListener("loadedmetadata", onDur);
       a.removeEventListener("timeupdate", onTimeEv);
       a.removeEventListener("play", onPlay);
       a.removeEventListener("pause", onPause);
+      a.removeEventListener("ended", onEnded);
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeIndex]);
 
   // cleanup blob URL on unmount
   useEffect(() => {
@@ -305,75 +285,103 @@ export default function Album() {
     };
   }, []);
 
-  // playlist to render
+  // compute base playlist from catalog
+  const baseCatalogPlaylist = useMemo(() => {
+    if (!project) return [];
+    return buildAlbumPlaylistFromCatalog(project);
+  }, [project]);
+
+  // ensure playlistOrder exists and is sane
+  const playlistOrder = useMemo(() => {
+    const order = Array.isArray(project?.album?.playlistOrder) ? project.album.playlistOrder : [];
+    const cleaned = order
+      .map((x) => Number(x))
+      .filter((n) => Number.isFinite(n) && n >= 1)
+      .slice(0, 99);
+    if (cleaned.length) return cleaned;
+    return baseCatalogPlaylist.map((t) => Number(t.sourceSlot));
+  }, [project, baseCatalogPlaylist]);
+
+  // playlist shown (order applied)
   const playlist = useMemo(() => {
     if (!project) return [];
-    if (playlistLocked) {
-      const snap = Array.isArray(project?.album?.songs) ? project.album.songs : [];
-      return snap.map((t, i) => ({
-        ...t,
-        trackNo: i + 1,
-        durationSeconds: Number(t?.durationSeconds || 0) || 0,
-      }));
+
+    // map slot -> latest title+s3Key from catalog
+    const bySlot = new Map(baseCatalogPlaylist.map((t) => [Number(t.sourceSlot), t]));
+
+    // build in order; if locked and we have snapshot songs, prefer snapshot titles/s3Keys but still order by playlistOrder
+    const snapSongs = Array.isArray(project?.album?.songs) ? project.album.songs : [];
+    const snapBySlot = new Map(snapSongs.map((t) => [Number(t.sourceSlot), t]));
+
+    const out = [];
+    for (const slot of playlistOrder) {
+      const s = Number(slot);
+      const fromSnap = playlistLocked ? snapBySlot.get(s) : null;
+      const fromCatalog = bySlot.get(s);
+      const best = fromSnap || fromCatalog || { sourceSlot: s, title: `Song ${s}`, file: { s3Key: "" } };
+      out.push({
+        trackNo: out.length + 1,
+        sourceSlot: Number(best.sourceSlot || s),
+        title: String(best.title || `Song ${s}`),
+        file: { s3Key: String(best?.file?.s3Key || "") },
+      });
     }
-    return buildDerivedPlaylistFromCatalog(project, orderIds);
-  }, [project, playlistLocked, orderIds]);
 
-  // keep activeIndex in range
-  useEffect(() => {
-    if (!playlist.length) return;
-    if (activeIndex < 0) return;
-    if (activeIndex >= playlist.length) setActiveIndex(playlist.length - 1);
-  }, [playlist.length, activeIndex]);
-
-  // continuous play (next when ended)
-  useEffect(() => {
-    const a = audioRef.current;
-    if (!a) return;
-
-    const onEnded = () => {
-      if (!playlist.length) return;
-      const next = activeIndex + 1;
-      if (next < playlist.length) playIndex(next);
-      else {
-        setIsPlaying(false);
-        setActiveIndex(-1);
+    // append any catalog slots not in order (rare)
+    const seen = new Set(out.map((x) => Number(x.sourceSlot)));
+    for (const t of baseCatalogPlaylist) {
+      const s = Number(t.sourceSlot);
+      if (!seen.has(s)) {
+        out.push({
+          trackNo: out.length + 1,
+          sourceSlot: s,
+          title: String(t.title || `Song ${s}`),
+          file: { s3Key: String(t?.file?.s3Key || "") },
+        });
       }
-    };
+    }
 
-    a.addEventListener("ended", onEnded);
-    return () => a.removeEventListener("ended", onEnded);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeIndex, playlist]);
+    return out;
+  }, [project, baseCatalogPlaylist, playlistOrder, playlistLocked]);
 
-  // toggle locks (independent per card)
+  const totalSeconds = useMemo(() => {
+    // Album total time is known only if we have per-track durations; we do not.
+    // Keep 0 and show "—" in UI.
+    return 0;
+  }, []);
+
+  function persistProject(next) {
+    saveProject(projectId, next);
+    setProject(next);
+  }
+
+  // toggle locks (independent per-card)
   function toggleLock(lockKey) {
     if (lockBusy) return;
     setLockBusy(true);
     setErr("");
 
     try {
+      // flip UI immediately
+      setLocksUI((prev) => ({ ...prev, [lockKey]: !Boolean(prev?.[lockKey]) }));
+
       const current = rereadProject() || project;
       if (!current) return;
 
       const wasLocked = parseLock(current?.album?.locks?.[lockKey]);
       const nextVal = !wasLocked;
 
-      // UI flip immediately
-      setLocksUI((prev) => ({ ...prev, [lockKey]: nextVal }));
-
       let nextAlbum = {
         ...(current?.album || {}),
         locks: { ...(current?.album?.locks || {}), [lockKey]: nextVal },
       };
 
-      // when turning Playlist lock ON, snapshot the derived playlist into album.songs once
+      // when turning Playlist lock ON: snapshot current arranged playlist into album.songs
       if (lockKey === "playlistComplete" && nextVal === true) {
-        const snap = buildDerivedPlaylistFromCatalog(current, orderIds);
         nextAlbum = {
           ...nextAlbum,
-          songs: snap,
-          playlistOrder: Array.isArray(orderIds) ? [...orderIds] : [],
+          songs: Array.isArray(playlist) ? playlist : [],
+          playlistOrder: Array.isArray(playlistOrder) ? playlistOrder : [],
         };
       }
 
@@ -382,45 +390,56 @@ export default function Album() {
         album: nextAlbum,
         updatedAt: new Date().toISOString(),
       };
-
-      saveProject(projectId, next);
-      setProject(next);
+      persistProject(next);
     } finally {
       setLockBusy(false);
     }
   }
 
-  // drag/drop only when playlist unlocked
+  // DnD helpers (gated ONLY by Playlist lock)
   function onDragStart(idx) {
     if (playlistLocked) return;
-    dragFromIdxRef.current = idx;
+    dragFromRef.current = idx;
   }
+
   function onDragOver(e) {
     if (playlistLocked) return;
     e.preventDefault();
   }
-  function onDrop(idx) {
-    if (playlistLocked) return;
-    const from = dragFromIdxRef.current;
-    dragFromIdxRef.current = -1;
-    if (from < 0 || from === idx) return;
 
-    const nextOrder = moveItem(orderIds, from, idx);
-    setOrderIds(nextOrder);
+  function onDrop(toIdx) {
+    if (playlistLocked) return;
+
+    const fromIdx = dragFromRef.current;
+    dragFromRef.current = null;
+    if (fromIdx == null || fromIdx === toIdx) return;
 
     const current = rereadProject() || project;
     if (!current) return;
 
+    const order = [...playlistOrder];
+    const moved = order.splice(fromIdx, 1)[0];
+    order.splice(toIdx, 0, moved);
+
     const next = {
       ...current,
-      album: { ...(current.album || {}), playlistOrder: nextOrder },
+      album: {
+        ...(current.album || {}),
+        playlistOrder: order,
+      },
       updatedAt: new Date().toISOString(),
     };
-    saveProject(projectId, next);
-    setProject(next);
+    persistProject(next);
+
+    // keep activeIndex tracking the same song slot if it was moved
+    const nowSlot = playlist[fromIdx]?.sourceSlot;
+    if (Number.isFinite(Number(nowSlot))) {
+      const newIndex = order.findIndex((x) => Number(x) === Number(nowSlot));
+      if (newIndex >= 0) setActiveIndex(newIndex);
+    }
   }
 
-  // album meta setters (locked by Meta lock)
+  // meta setters (gated by Meta lock)
   function setAlbumMetaField(key, value) {
     if (metaLocked) return;
     const current = rereadProject() || project;
@@ -429,16 +448,18 @@ export default function Album() {
     const next = {
       ...current,
       album: {
-        ...(current?.album || {}),
-        meta: { ...(current?.album?.meta || {}), [key]: String(value || "") },
+        ...(current.album || {}),
+        meta: {
+          ...(current.album?.meta || {}),
+          [key]: String(value ?? ""),
+        },
       },
       updatedAt: new Date().toISOString(),
     };
-    saveProject(projectId, next);
-    setProject(next);
+    persistProject(next);
   }
 
-  // cover setters (locked by Cover lock)
+  // cover setters (gated by Cover lock)
   function setCoverS3Key(nextKey) {
     if (coverLocked) return;
     const current = rereadProject() || project;
@@ -447,74 +468,40 @@ export default function Album() {
     const next = {
       ...current,
       album: {
-        ...(current?.album || {}),
-        cover: { ...(current?.album?.cover || {}), s3Key: String(nextKey || "").trim() },
+        ...(current.album || {}),
+        cover: { ...(current.album?.cover || {}), s3Key: String(nextKey || "").trim() },
       },
       updatedAt: new Date().toISOString(),
     };
-    saveProject(projectId, next);
-    setProject(next);
+    persistProject(next);
   }
 
-  async function uploadCoverFile(file) {
+  function uploadCoverFile(file) {
     if (coverLocked) return;
     if (!file) return;
-    setErr("");
 
-    if (!API_BASE) {
-      setErr("Missing VITE_BACKEND_URL (or VITE_API_BASE)");
-      return;
-    }
-
-    // local preview first
     const old = String(lastPreviewUrlRef.current || "");
     if (old.startsWith("blob:")) {
       try {
         URL.revokeObjectURL(old);
       } catch {}
     }
+
     const url = URL.createObjectURL(file);
     lastPreviewUrlRef.current = url;
 
-    // persist preview url
-    {
-      const current = rereadProject() || project;
-      if (current) {
-        const next = {
-          ...current,
-          album: {
-            ...(current?.album || {}),
-            cover: { ...(current?.album?.cover || {}), localPreviewUrl: url },
-          },
-          updatedAt: new Date().toISOString(),
-        };
-        saveProject(projectId, next);
-        setProject(next);
-      }
-    }
+    const current = rereadProject() || project;
+    if (!current) return;
 
-    // upload to backend -> S3
-    try {
-      setBusy("Uploading cover…");
-      const s3Key = `storage/projects/${projectId}/album/cover/${isoForKey()}__${safeName(file.name)}`;
-
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("s3Key", s3Key);
-
-      const r = await fetch(`${API_BASE}/api/upload-to-s3?projectId=${encodeURIComponent(projectId)}`, {
-        method: "POST",
-        body: fd,
-      });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j?.ok) throw new Error(j?.error || `HTTP ${r.status}`);
-
-      setCoverS3Key(String(j.s3Key || s3Key));
-      setBusy("");
-    } catch (e) {
-      setBusy("");
-      setErr(e?.message || "Cover upload failed");
-    }
+    const next = {
+      ...current,
+      album: {
+        ...(current.album || {}),
+        cover: { ...(current.album?.cover || {}), localPreviewUrl: url },
+      },
+      updatedAt: new Date().toISOString(),
+    };
+    persistProject(next);
   }
 
   function clearCover() {
@@ -534,26 +521,27 @@ export default function Album() {
     const next = {
       ...current,
       album: {
-        ...(current?.album || {}),
-        cover: { ...(current?.album?.cover || {}), s3Key: "", localPreviewUrl: "" },
+        ...(current.album || {}),
+        cover: { ...(current.album?.cover || {}), s3Key: "", localPreviewUrl: "" },
       },
       updatedAt: new Date().toISOString(),
     };
-    saveProject(projectId, next);
-    setProject(next);
+    persistProject(next);
   }
 
   async function playIndex(idx) {
     setErr("");
     if (!API_BASE) {
-      setErr("Missing VITE_BACKEND_URL (or VITE_API_BASE)");
+      setErr("Missing VITE_API_BASE");
       return;
     }
 
     const item = playlist[idx];
+    if (!item) return;
+
     const s3Key = String(item?.file?.s3Key || "").trim();
     if (!s3Key) {
-      setErr("Missing s3Key for this track.");
+      setErr("No s3Key for this track.");
       return;
     }
 
@@ -588,172 +576,81 @@ export default function Album() {
     const a = audioRef.current;
     if (!a) return;
 
-    if (activeIndex < 0 && playlist.length) {
-      playIndex(0);
-      return;
+    if (a.paused) {
+      // if nothing loaded yet, start first track
+      if (!a.src && playlist.length) {
+        playIndex(Math.max(0, activeIndex >= 0 ? activeIndex : 0));
+        return;
+      }
+      a.play().catch(() => {});
+    } else {
+      a.pause();
     }
-
-    if (a.paused) a.play().catch(() => {});
-    else a.pause();
   }
 
   function prevTrack() {
     if (!playlist.length) return;
-    const prev = activeIndex > 0 ? activeIndex - 1 : 0;
-    playIndex(prev);
+    const nextIdx = activeIndex > 0 ? activeIndex - 1 : 0;
+    playIndex(nextIdx);
   }
 
   function nextTrack() {
     if (!playlist.length) return;
-    const next = activeIndex + 1;
-    if (next < playlist.length) playIndex(next);
+    const nextIdx = activeIndex >= 0 ? activeIndex + 1 : 0;
+    if (nextIdx >= playlist.length) return;
+    playIndex(nextIdx);
   }
 
-  // total album time (best-effort)
-  const totalSeconds = useMemo(() => {
-    return playlist.reduce((acc, t) => acc + (Number(t?.durationSeconds || 0) || 0), 0);
-  }, [playlist]);
+  // Master Save snapshot (correct shape) + 2-tier confirm + final alert
+  async function masterSaveAlbum() {
+    if (msBusy) return;
 
- // Master Save (2-tier confirm + final alert)
-async function masterSaveAlbum() {
-  if (msBusy) return;
+    const first = window.confirm("Are you sure you want to Master Save Album?\n\nThis writes the Album snapshot.");
+    if (!first) return;
 
-  // 2-step confirmation
-  const first = window.confirm("Are you sure you want to Master Save Album?\n\nThis writes the Album snapshot.");
-  if (!first) return;
+    const second = window.confirm("Last chance.\n\nDouble-check everything before saving.");
+    if (!second) return;
 
-  const second = window.confirm("Last chance.\n\nDouble-check everything before saving.");
-  if (!second) return;
+    setMsBusy(true);
+    setErr("");
 
-  setMsBusy(true);
-  setMsMsg("");
-  setErr("");
+    try {
+      const current = rereadProject() || project;
+      if (!current) throw new Error("No project loaded.");
 
-  try {
-    const current = rereadProject() || project;
-    if (!current) {
-      setMsMsg("No project loaded.");
-      return;
+      const snap = {
+        buildStamp: ALBUM_BUILD_STAMP,
+        savedAt: new Date().toISOString(),
+        projectId,
+        locks: {
+          playlistComplete: Boolean(locksUI.playlistComplete),
+          metaComplete: Boolean(locksUI.metaComplete),
+          coverComplete: Boolean(locksUI.coverComplete),
+        },
+        playlistOrder: Array.isArray(playlistOrder) ? [...playlistOrder] : [],
+        songs: Array.isArray(playlist) ? playlist.map((t) => ({ ...t, file: { ...(t.file || {}) } })) : [],
+        meta: { ...(current?.album?.meta || {}) },
+        cover: { ...(current?.album?.cover || {}) },
+        totalSeconds: Number(totalSeconds || 0),
+      };
+
+      const next = {
+        ...current,
+        album: {
+          ...(current.album || {}),
+          masterSave: snap,
+        },
+        updatedAt: new Date().toISOString(),
+      };
+
+      persistProject(next);
+
+      window.alert("Album Master Save confirmed.\n\nSnapshot written to album.masterSave.");
+    } catch (e) {
+      setErr(e?.message || "Master Save failed");
+    } finally {
+      setMsBusy(false);
     }
-
-    const snapshotPlaylist = playlistLocked
-      ? (Array.isArray(current?.album?.songs) ? current.album.songs : [])
-      : buildAlbumPlaylistFromCatalog(current);
-
-    const nowIso = new Date().toISOString();
-
-    const snapshot = {
-      buildStamp: ALBUM_BUILD_STAMP,
-      savedAt: nowIso,
-      projectId,
-      locks: {
-        playlistComplete: Boolean(locksUI.playlistComplete),
-        metaComplete: Boolean(locksUI.metaComplete),
-        coverComplete: Boolean(locksUI.coverComplete),
-      },
-      playlist: snapshotPlaylist,
-      meta: { ...(current?.album?.meta || {}) },
-      cover: { ...(current?.album?.cover || {}) },
-    };
-
-    const next = {
-      ...current,
-      album: {
-        ...(current?.album || {}),
-        masterSave: snapshot,
-      },
-      updatedAt: nowIso,
-    };
-
-    saveProject(projectId, next);
-    setProject(next);
-
-    setMsMsg(`Album Master Saved @ ${nowIso}`);
-    setMsArmed(false);
-
-    // FINAL CONFIRMATION MESSAGE
-    window.alert(`Master Save confirmed.\n\nAlbum Master Saved @ ${nowIso}`);
-  } catch (e) {
-    setErr(e?.message || "Master Save failed");
-  } finally {
-    setMsBusy(false);
-  }
-}
-
-  try {
-    const current = rereadProject() || project;
-    if (!current) {
-      setMsMsg("No project loaded.");
-      return;
-    }
-
-    const nowIso = new Date().toISOString();
-
-    // Snapshot playlist: if playlist is locked, use album.songs; else derive from catalog right now.
-    const snapshotPlaylist = playlistLocked
-      ? Array.isArray(current?.album?.songs)
-        ? current.album.songs
-        : []
-      : buildAlbumPlaylistFromCatalog(current);
-
-    // Album meta fields (keep existing note if you still use it elsewhere)
-    const albumMeta = {
-      albumTitle: String(current?.album?.meta?.albumTitle || ""),
-      artistName: String(current?.album?.meta?.artistName || ""),
-      releaseDate: String(current?.album?.meta?.releaseDate || ""),
-      note: String(current?.album?.meta?.note || ""),
-    };
-
-    // Cover payload
-    const albumCover = {
-      s3Key: String(current?.album?.cover?.s3Key || ""),
-      localPreviewUrl: String(current?.album?.cover?.localPreviewUrl || ""),
-    };
-
-    // Total time (best-effort; if you don’t store per-track seconds yet, keep 0)
-    const albumTotalTimeSeconds = snapshotPlaylist.reduce((sum, t) => {
-      const v = Number(t?.durationSeconds);
-      return sum + (Number.isFinite(v) ? v : 0);
-    }, 0);
-
-    // REQUIRED snapshot shape
-    const snapshot = {
-      buildStamp: ALBUM_BUILD_STAMP,
-      savedAt: nowIso,
-      projectId,
-      locks: {
-        playlistComplete: Boolean(current?.album?.locks?.playlistComplete),
-        metaComplete: Boolean(current?.album?.locks?.metaComplete),
-        coverComplete: Boolean(current?.album?.locks?.coverComplete),
-        // If you added a separate cover-upload lock, include it here too:
-        coverUploadComplete: Boolean(current?.album?.locks?.coverUploadComplete),
-      },
-      playlist: snapshotPlaylist,
-      meta: albumMeta,
-      cover: albumCover,
-      albumTotalTimeSeconds,
-    };
-
-    const next = {
-      ...current,
-      album: {
-        ...(current?.album || {}),
-        masterSave: snapshot,
-      },
-      updatedAt: nowIso,
-    };
-
-    saveProject(projectId, next);
-    setProject(next);
-
-    setMsMsg(`Album Master Saved @ ${nowIso}`);
-    setMsArmed(false);
-
-    window.alert("Album Master Save complete.\n\nSnapshot written to album.masterSave.");
-  } catch (e) {
-    setErr(e?.message || "Master Save failed");
-  } finally {
-    setMsBusy(false);
   }
 
   if (!projectId) return <div style={{ padding: 24 }}>Missing projectId</div>;
@@ -769,11 +666,11 @@ async function masterSaveAlbum() {
   const nowTrack = activeIndex >= 0 ? playlist[activeIndex] : null;
 
   return (
-    <div style={{ maxWidth: 1100, padding: 18 }}>
-      {/* Header Row (no build stamp) */}
+    <div style={{ maxWidth: 1200, padding: 18 }}>
+      {/* Header */}
       <div style={{ paddingBottom: 10, borderBottom: "1px solid #e5e7eb" }}>
-        <div style={{ fontSize: 32, fontWeight: 950, color: "#0f172a" }}>Album</div>
-        <div style={{ fontSize: 12, opacity: 0.7 }}>
+        <div style={{ fontSize: 30, fontWeight: 950 }}>Album</div>
+        <div style={{ fontSize: 12, opacity: 0.75 }}>
           Project <b>{projectId}</b>
         </div>
       </div>
@@ -781,15 +678,15 @@ async function masterSaveAlbum() {
       {busy ? <div style={{ marginTop: 10, fontWeight: 900 }}>{busy}</div> : null}
       {err ? <div style={{ marginTop: 10, color: "#991b1b", fontWeight: 900 }}>{err}</div> : null}
 
-      {/* Two-Column Grid */}
-      <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, alignItems: "start" }}>
+      {/* Two columns */}
+      <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, alignItems: "start" }}>
         {/* LEFT COLUMN */}
         <div style={{ display: "grid", gap: 14 }}>
-          {/* (L1) PLAYER CARD */}
+          {/* (L1) PLAYER CARD (top) */}
           <Card
             title="Player"
             right={
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                 <button type="button" onClick={prevTrack} style={styles.softBtn} title="Prev">
                   Prev
                 </button>
@@ -804,19 +701,19 @@ async function masterSaveAlbum() {
           >
             <div style={{ fontSize: 12, opacity: 0.75 }}>
               Now Playing:{" "}
-              <span style={{ fontWeight: 900 }}>
-                {nowTrack ? `${nowTrack.title || `Song ${nowTrack.sourceSlot}`}` : "—"}
+              <span style={{ fontFamily: styles.mono, fontWeight: 900 }}>
+                {nowTrack ? `#${activeIndex + 1} · ${nowTrack.title || `Song ${nowTrack.sourceSlot}`}` : "—"}
               </span>
             </div>
 
             <div style={{ marginTop: 10 }}>
               <audio ref={audioRef} />
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 8 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 6 }}>
                 <div style={{ fontFamily: styles.mono, fontSize: 12, opacity: 0.85 }}>
                   {fmtTime(time)} / {fmtTime(dur)}
                 </div>
-                <div style={{ fontFamily: styles.mono, fontSize: 12, opacity: 0.6 }}>
-                  track {activeIndex >= 0 ? activeIndex + 1 : "—"} / {playlist.length || "—"}
+                <div style={{ fontFamily: styles.mono, fontSize: 12, opacity: 0.7 }}>
+                  {dur > 0 ? `${Math.round((time / dur) * 100)}%` : "—"}
                 </div>
               </div>
               <input
@@ -833,24 +730,26 @@ async function masterSaveAlbum() {
             </div>
           </Card>
 
-          {/* (L2) TRACKS + DRAG/DROP CARD */}
+          {/* (L2) TRACKS CARD (below player) */}
           <Card
             title="Tracks"
             right={<LockPill locked={playlistLocked} onToggle={() => toggleLock("playlistComplete")} disabled={lockBusy} label="Playlist" />}
           >
             <div style={{ fontSize: 12, opacity: 0.72, lineHeight: 1.5 }}>
-              {playlistLocked ? "LOCKED — drag & drop disabled." : "UNLOCKED — drag & drop enabled."}
+              {playlistLocked
+                ? "LOCKED — drag & drop disabled."
+                : "UNLOCKED — drag & drop enabled. Click a track to play in this order."}
             </div>
 
-            <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+            <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
               {playlist.map((t, i) => {
                 const active = i === activeIndex;
-                const durS = Number(t?.durationSeconds || 0) || 0;
+                const canDrag = !playlistLocked;
 
                 return (
                   <div
                     key={`${t.sourceSlot}-${i}`}
-                    draggable={!playlistLocked}
+                    draggable={canDrag}
                     onDragStart={() => onDragStart(i)}
                     onDragOver={onDragOver}
                     onDrop={() => onDrop(i)}
@@ -859,32 +758,28 @@ async function masterSaveAlbum() {
                       padding: 10,
                       border: "1px solid #e5e7eb",
                       borderRadius: 12,
-                      background: active ? "rgba(59,130,246,0.08)" : "#fff",
+                      background: active ? "rgba(59,130,246,0.10)" : "#fff",
                       cursor: "pointer",
+                      userSelect: "none",
                       display: "flex",
                       justifyContent: "space-between",
                       gap: 10,
                       alignItems: "center",
-                      userSelect: "none",
+                      opacity: playlistLocked ? 0.95 : 1,
                     }}
-                    title={playlistLocked ? "Locked" : "Drag to reorder"}
+                    title={canDrag ? "Drag to reorder (unlocked)" : "Locked"}
                   >
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontWeight: 900, color: "#0f172a", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      <div style={{ fontSize: 13, fontWeight: 950, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {i + 1}. {t.title || `Song ${t.sourceSlot}`}
                       </div>
-                      <div style={{ marginTop: 3, fontFamily: styles.mono, fontSize: 11, opacity: 0.65 }}>
-                        slot-{t.sourceSlot}
+                      <div style={{ fontFamily: styles.mono, fontSize: 11, opacity: 0.7, marginTop: 4 }}>
+                        slot={t.sourceSlot} · s3Key={t.file?.s3Key ? "yes" : "—"}
                       </div>
                     </div>
 
-                    <div style={{ display: "flex", gap: 10, alignItems: "center", flex: "0 0 auto" }}>
-                      <div style={{ fontFamily: styles.mono, fontSize: 12, opacity: 0.85 }}>
-                        {durS > 0 ? fmtTime(durS) : "—"}
-                      </div>
-                      {!playlistLocked ? (
-                        <div style={{ fontFamily: styles.mono, fontSize: 12, opacity: 0.5 }}>≡</div>
-                      ) : null}
+                    <div style={{ fontFamily: styles.mono, fontSize: 12, fontWeight: 900, opacity: 0.75 }}>
+                      {active ? "▶" : " "}
                     </div>
                   </div>
                 );
@@ -900,47 +795,70 @@ async function masterSaveAlbum() {
             title="Album Meta"
             right={<LockPill locked={metaLocked} onToggle={() => toggleLock("metaComplete")} disabled={lockBusy} label="Meta" />}
           >
-            <div style={{ display: "grid", gap: 10 }}>
-              <div>
-                <div style={styles.fieldLabel}>Album Title</div>
-                <input
-                  value={albumTitle}
-                  disabled={metaLocked}
-                  onChange={(e) => setAlbumMetaField("albumTitle", e.target.value)}
-                  style={metaLocked ? styles.inputDisabled : styles.input}
-                  placeholder="Album title"
-                />
-              </div>
+            <div style={{ fontSize: 12, opacity: 0.72, lineHeight: 1.5 }}>
+              {metaLocked ? "LOCKED — album meta is read-only." : "Edit album-level fields."}
+            </div>
 
-              <div>
-                <div style={styles.fieldLabel}>Artist Name</div>
-                <input
-                  value={artistName}
-                  disabled={metaLocked}
-                  onChange={(e) => setAlbumMetaField("artistName", e.target.value)}
-                  style={metaLocked ? styles.inputDisabled : styles.input}
-                  placeholder="Artist name"
-                />
-              </div>
-
-              <div>
-                <div style={styles.fieldLabel}>Release Date</div>
-                <input
-                  value={releaseDate}
-                  disabled={metaLocked}
-                  onChange={(e) => setAlbumMetaField("releaseDate", e.target.value)}
-                  style={metaLocked ? styles.inputDisabled : styles.input}
-                  placeholder="YYYY-MM-DD"
-                />
-              </div>
-
-              <div>
-                <div style={styles.fieldLabel}>Total Album Time</div>
-                <div style={{ fontFamily: styles.mono, fontSize: 13, fontWeight: 900, opacity: 0.85 }}>
-                  {totalSeconds > 0 ? fmtTime(totalSeconds) : "—"}
+            {metaLocked ? (
+              <ReadonlyBox title="LOCKED — Album Meta">
+                <div style={{ display: "grid", gap: 10 }}>
+                  <div>
+                    <div style={styles.fieldLabel}>Album Title</div>
+                    <div style={{ fontFamily: styles.mono, fontSize: 13, fontWeight: 900, opacity: 0.85 }}>{albumTitle || "—"}</div>
+                  </div>
+                  <div>
+                    <div style={styles.fieldLabel}>Artist Name</div>
+                    <div style={{ fontFamily: styles.mono, fontSize: 13, fontWeight: 900, opacity: 0.85 }}>{artistName || "—"}</div>
+                  </div>
+                  <div>
+                    <div style={styles.fieldLabel}>Release Date</div>
+                    <div style={{ fontFamily: styles.mono, fontSize: 13, fontWeight: 900, opacity: 0.85 }}>{releaseDate || "—"}</div>
+                  </div>
+                  <div>
+                    <div style={styles.fieldLabel}>Album Total Time</div>
+                    <div style={{ fontFamily: styles.mono, fontSize: 13, fontWeight: 900, opacity: 0.85 }}>
+                      {totalSeconds > 0 ? fmtTime(totalSeconds) : "—"}
+                    </div>
+                  </div>
+                </div>
+              </ReadonlyBox>
+            ) : (
+              <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+                <div>
+                  <div style={styles.fieldLabel}>Album Title</div>
+                  <input
+                    value={albumTitle}
+                    onChange={(e) => setAlbumMetaField("albumTitle", e.target.value)}
+                    style={styles.input}
+                    placeholder="Album title"
+                  />
+                </div>
+                <div>
+                  <div style={styles.fieldLabel}>Artist Name</div>
+                  <input
+                    value={artistName}
+                    onChange={(e) => setAlbumMetaField("artistName", e.target.value)}
+                    style={styles.input}
+                    placeholder="Artist name"
+                  />
+                </div>
+                <div>
+                  <div style={styles.fieldLabel}>Release Date</div>
+                  <input
+                    value={releaseDate}
+                    onChange={(e) => setAlbumMetaField("releaseDate", e.target.value)}
+                    style={styles.input}
+                    placeholder="YYYY-MM-DD"
+                  />
+                </div>
+                <div>
+                  <div style={styles.fieldLabel}>Album Total Time</div>
+                  <div style={{ fontFamily: styles.mono, fontSize: 13, fontWeight: 900, opacity: 0.85 }}>
+                    {totalSeconds > 0 ? fmtTime(totalSeconds) : "—"}
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
           </Card>
 
           {/* (R2) COVER UPLOAD CARD */}
@@ -949,7 +867,7 @@ async function masterSaveAlbum() {
             right={<LockPill locked={coverLocked} onToggle={() => toggleLock("coverComplete")} disabled={lockBusy} label="Cover" />}
           >
             <div style={{ fontSize: 12, opacity: 0.72, lineHeight: 1.5 }}>
-              {coverLocked ? "LOCKED — cover changes disabled." : "Upload a cover image (uploads to S3 via backend)."}
+              {coverLocked ? "LOCKED — cover changes disabled." : "Upload a cover image (local preview) and/or paste s3Key."}
             </div>
 
             <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
@@ -960,17 +878,12 @@ async function masterSaveAlbum() {
                   disabled={coverLocked}
                   onChange={(e) => setCoverS3Key(e.target.value)}
                   style={coverLocked ? styles.inputDisabled : styles.input}
-                  placeholder="(auto-filled after upload)"
+                  placeholder="Paste cover s3Key here (optional)"
                 />
               </div>
 
               <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                <input
-                  type="file"
-                  accept="image/*"
-                  disabled={coverLocked}
-                  onChange={(e) => uploadCoverFile(e.target.files?.[0] || null)}
-                />
+                <input type="file" accept="image/*" disabled={coverLocked} onChange={(e) => uploadCoverFile(e.target.files?.[0] || null)} />
                 <button type="button" onClick={clearCover} disabled={coverLocked} style={coverLocked ? styles.softBtnDisabled : styles.softBtn}>
                   Clear
                 </button>
@@ -997,6 +910,7 @@ async function masterSaveAlbum() {
             <div style={{ fontSize: 18, fontWeight: 950 }}>Master Save</div>
             <div style={{ marginTop: 6, fontFamily: styles.mono, fontSize: 12, opacity: 0.8 }}>
               {project?.album?.masterSave?.savedAt ? `Album Master Saved @ ${project.album.masterSave.savedAt}` : "—"}
+            </div>
           </div>
 
           <button
