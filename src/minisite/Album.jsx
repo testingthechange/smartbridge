@@ -118,7 +118,10 @@ export default function Album() {
     return (sp.get("projectId") || "").trim();
   }, [params, location.search]);
 
-  const API_BASE = useMemo(() => normalizeBase(import.meta.env.VITE_API_BASE), []);
+  const API_BASE = useMemo(
+    () => normalizeBase(import.meta.env.VITE_API_BASE || import.meta.env.VITE_BACKEND_URL || ""),
+    []
+  );
 
   const [project, setProject] = useState(() => (projectId ? loadProject(projectId) : null));
   const [busy, setBusy] = useState("");
@@ -138,6 +141,12 @@ export default function Album() {
   const [msArmed, setMsArmed] = useState(false);
   const [msBusy, setMsBusy] = useState(false);
   const [msMsg, setMsMsg] = useState("");
+
+  // Publish (no popups)
+  const [pubArmed, setPubArmed] = useState(false);
+  const [pubBusy, setPubBusy] = useState(false);
+  const [pubMsg, setPubMsg] = useState("");
+  const [pub, setPub] = useState(null);
 
   // player
   const audioRef = useRef(null);
@@ -186,6 +195,8 @@ export default function Album() {
           locks: { playlistComplete: false, metaComplete: false, coverComplete: false },
           meta: { note: "" },
           cover: { s3Key: "", localPreviewUrl: "" },
+          masterSave: null,
+          publish: null,
         },
       };
 
@@ -202,6 +213,8 @@ export default function Album() {
         },
         meta: { note: "", ...(base.album?.meta || {}) },
         cover: { s3Key: "", localPreviewUrl: "", ...(base.album?.cover || {}) },
+        masterSave: base.album?.masterSave || null,
+        publish: base.album?.publish || null,
       },
       updatedAt: new Date().toISOString(),
     };
@@ -222,6 +235,7 @@ export default function Album() {
       metaComplete: parseLock(l.metaComplete),
       coverComplete: parseLock(l.coverComplete),
     });
+    setPub(project?.album?.publish || null);
   }, [project]);
 
   // audio events
@@ -311,9 +325,10 @@ export default function Album() {
         ? (Array.isArray(current?.album?.songs) ? current.album.songs : [])
         : buildAlbumPlaylistFromCatalog(current);
 
+      const savedAt = new Date().toISOString();
       const snapshot = {
         buildStamp: ALBUM_BUILD_STAMP,
-        savedAt: new Date().toISOString(),
+        savedAt,
         projectId,
         locks: {
           playlistComplete: Boolean(locksUI.playlistComplete),
@@ -325,24 +340,92 @@ export default function Album() {
         cover: { ...(current?.album?.cover || {}) },
       };
 
-      const next = {
+      const nextLocal = {
         ...current,
         album: {
           ...(current?.album || {}),
           masterSave: snapshot,
         },
-        updatedAt: new Date().toISOString(),
+        updatedAt: savedAt,
       };
 
-      saveProject(projectId, next);
-      setProject(next);
+      // Save locally first so UI never blanks
+      saveProject(projectId, nextLocal);
+      setProject(nextLocal);
 
-      setMsMsg(`Album Master Saved @ ${snapshot.savedAt}`);
+      // Also push to backend master-save (so publish has a real snapshotKey)
+      if (API_BASE) {
+        const r = await fetch(`${API_BASE}/api/master-save`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId, project: nextLocal }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j?.ok) throw new Error(j?.error || `HTTP ${r.status}`);
+
+        const nextWithKey = {
+          ...nextLocal,
+          album: {
+            ...(nextLocal.album || {}),
+            masterSave: { ...(nextLocal.album?.masterSave || {}), snapshotKey: String(j.snapshotKey || "") },
+          },
+        };
+        saveProject(projectId, nextWithKey);
+        setProject(nextWithKey);
+      }
+
+      setMsMsg(`Album Master Saved @ ${savedAt}`);
       setMsArmed(false);
     } catch (e) {
       setErr(e?.message || "Master Save failed");
     } finally {
       setMsBusy(false);
+    }
+  }
+
+  async function publishMiniSite() {
+    if (pubBusy) return;
+    setPubBusy(true);
+    setPubMsg("");
+    setErr("");
+
+    try {
+      if (!API_BASE) throw new Error("Missing VITE_API_BASE / VITE_BACKEND_URL");
+      const current = rereadProject() || project;
+      if (!current) throw new Error("No project loaded");
+
+      const snapshotKey = String(current?.album?.masterSave?.snapshotKey || "").trim();
+      if (!snapshotKey) throw new Error("No snapshotKey. Run Album Master Save first (must hit backend).");
+
+      const r = await fetch(`${API_BASE}/api/publish-minisite`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, snapshotKey }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j?.ok) throw new Error(j?.error || `HTTP ${r.status}`);
+
+      const publishedAt = new Date().toISOString();
+      const nextPub = { ...j, publishedAt };
+      setPub(nextPub);
+
+      const nextLocal = {
+        ...current,
+        album: {
+          ...(current?.album || {}),
+          publish: nextPub,
+        },
+        updatedAt: publishedAt,
+      };
+      saveProject(projectId, nextLocal);
+      setProject(nextLocal);
+
+      setPubMsg("Publish complete.");
+      setPubArmed(false);
+    } catch (e) {
+      setErr(e?.message || "Publish failed");
+    } finally {
+      setPubBusy(false);
     }
   }
 
@@ -438,7 +521,7 @@ export default function Album() {
   async function playIndex(idx) {
     setErr("");
     if (!API_BASE) {
-      setErr("Missing VITE_API_BASE");
+      setErr("Missing VITE_API_BASE / VITE_BACKEND_URL");
       return;
     }
 
@@ -479,6 +562,7 @@ export default function Album() {
   const metaNote = String(project?.album?.meta?.note || "");
   const coverKey = String(project?.album?.cover?.s3Key || "");
   const coverPreview = String(project?.album?.cover?.localPreviewUrl || "");
+  const msSavedAt = String(project?.album?.masterSave?.savedAt || ""); // FIX: prevents msSavedAt crash
 
   return (
     <div style={{ maxWidth: 1100, padding: 18 }}>
@@ -650,76 +734,77 @@ export default function Album() {
             />
           </div>
         ) : null}
-      </div>{/* ===================== MASTER SAVE (SINGLE) ===================== */}
-<div style={{ marginTop: 22, paddingTop: 14, borderTop: "1px solid #ddd" }}>
-  <div style={{ fontSize: 20, fontWeight: 950 }}>Master Save</div>
+      </div>
 
-  <div style={{ marginTop: 8, fontFamily: "monospace", fontSize: 14 }}>
-    {msSavedAt ? `Album Master Saved @ ${msSavedAt}` : "—"}
-  </div>
+      {/* ===================== MASTER SAVE + PUBLISH ===================== */}
+      <div style={{ marginTop: 22, paddingTop: 14, borderTop: "1px solid #ddd" }}>
+        <div style={{ fontSize: 20, fontWeight: 950 }}>Master Save</div>
 
-  <div style={{ marginTop: 10, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-    {!msArmed ? (
-      <button
-        type="button"
-        onClick={() => setMsArmed(true)}
-        disabled={msBusy}
-        style={{
-          padding: "10px 14px",
-          borderRadius: 14,
-          border: "1px solid #ddd",
-          background: "#fff",
-          fontWeight: 950,
-          cursor: msBusy ? "not-allowed" : "pointer",
-          opacity: msBusy ? 0.6 : 1,
-        }}
-      >
-        Master Save
-      </button>
-    ) : (
-      <>
-        <button
-          type="button"
-          onClick={masterSaveAlbum}
-          disabled={msBusy}
-          style={{
-            padding: "10px 14px",
-            borderRadius: 14,
-            border: "1px solid #ddd",
-            background: "#fff",
-            fontWeight: 950,
-            cursor: msBusy ? "not-allowed" : "pointer",
-            opacity: msBusy ? 0.6 : 1,
-          }}
-        >
-          Confirm Master Save
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setMsArmed(false)}
-          disabled={msBusy}
-          style={{
-            padding: "10px 14px",
-            borderRadius: 14,
-            border: "1px solid #ddd",
-            background: "#fff",
-            fontWeight: 950,
-            cursor: msBusy ? "not-allowed" : "pointer",
-            opacity: msBusy ? 0.6 : 1,
-          }}
-        >
-          Cancel
-        </button>
-
-        <div style={{ fontSize: 14, opacity: 0.8 }}>
-          Writes album.masterSave snapshot (playlist/meta/cover/locks/buildStamp) + stores snapshotKey.
+        <div style={{ marginTop: 8, fontFamily: "monospace", fontSize: 14 }}>
+          {msSavedAt ? `Album Master Saved @ ${msSavedAt}` : "—"}
         </div>
-      </>
-    )}
+
+        <div style={{ marginTop: 10, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          {!msArmed ? (
+            <button
+              type="button"
+              onClick={() => setMsArmed(true)}
+              disabled={msBusy}
+              style={{
+                padding: "10px 14px",
+                borderRadius: 14,
+                border: "1px solid #ddd",
+                background: "#fff",
+                fontWeight: 950,
+                cursor: msBusy ? "not-allowed" : "pointer",
+                opacity: msBusy ? 0.6 : 1,
+              }}
+            >
+              Master Save
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={masterSaveAlbum}
+                disabled={msBusy}
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 14,
+                  border: "1px solid #ddd",
+                  background: "#fff",
+                  fontWeight: 950,
+                  cursor: msBusy ? "not-allowed" : "pointer",
+                  opacity: msBusy ? 0.6 : 1,
+                }}
+              >
+                Confirm Master Save
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setMsArmed(false)}
+                disabled={msBusy}
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 14,
+                  border: "1px solid #ddd",
+                  background: "#fff",
+                  fontWeight: 950,
+                  cursor: msBusy ? "not-allowed" : "pointer",
+                  opacity: msBusy ? 0.6 : 1,
+                }}
+              >
+                Cancel
+              </button>
+            </>
+          )}
+        </div>
+
+        {msMsg ? <div style={{ marginTop: 10, fontWeight: 900 }}>{msMsg}</div> : null}
 
         {/* Publish */}
-        <div style={{ border: "1px solid #e5e7eb", borderRadius: 14, padding: 14, background: "#fff" }}>
+        <div style={{ marginTop: 16, border: "1px solid #e5e7eb", borderRadius: 14, padding: 14, background: "#fff" }}>
           <div style={{ fontSize: 18, fontWeight: 950 }}>Publish</div>
 
           <div style={{ marginTop: 10, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
@@ -800,7 +885,11 @@ export default function Album() {
         </div>
       </div>
     </div>
-  </div>
-);
+  );
 }
 
+/*
+NOTE: You said you "do not see album view file".
+This Album.jsx does not import AlbumView. If you have AlbumView usage elsewhere,
+it’s not required for this file to render and not blank.
+*/
