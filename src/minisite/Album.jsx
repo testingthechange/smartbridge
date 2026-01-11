@@ -1018,21 +1018,8 @@ Album Master Saved @ 2026-01-11T06:08:07.086            </div>
 /* ---------------- styles ---------------- */
 const styles = {
   mono: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
-
-  card: {
-    background: "#ffffff",
-    border: "1px solid #e5e7eb",
-    borderRadius: 14,
-    padding: 14,
-  },
-
-  fieldLabel: {
-    fontSize: 11,
-    fontWeight: 950,
-    opacity: 0.7,
-    textTransform: "uppercase",
-    marginBottom: 6,
-  },
+  card: { background: "#ffffff", border: "1px solid #e5e7eb", borderRadius: 14, padding: 14 },
+  fieldLabel: { fontSize: 11, fontWeight: 950, opacity: 0.7, textTransform: "uppercase", marginBottom: 6 },
 
   input: {
     width: "100%",
