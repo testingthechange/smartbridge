@@ -1,54 +1,30 @@
 // FILE: src/minisite/Album.jsx
-// PURPOSE: Album page with 2-column layout, draggable playlist (gated by Playlist lock),
-// fully functional player (play/pause/prev/next/scrub/time),
-// independent per-card locks (Playlist / Album Meta / Cover),
-// album-level metadata fields, and correct playback order following drag arrangement.
+// FINALIZED ALBUM PAGE — LAYOUT LOCKED
+// Features:
+// - 2-column locked layout (no further replacements)
+// - Playlist card (drag & drop gated by Playlist lock)
+// - Songs play in drag order when clicked
+// - Player with play/pause/prev/next/scrub/time
+// - Album Meta card (title, artist, release date, total time) with its own lock
+// - Album Cover Upload card with its own lock
+// - Independent locks: Playlist / Album Meta / Album Cover
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
 import { loadProject, saveProject, fmtTime, once, fetchPlaybackUrl } from "./catalog/catalogCore.js";
 
 /* BUILD STAMP */
-const ALBUM_BUILD_STAMP = "STAMP-ALBUM-LAYOUT-DRAG-PLAYER-META-2026-01-11-A";
+const ALBUM_BUILD_STAMP = "STAMP-ALBUM-LAYOUT-LOCKED-2026-01-11-B";
 
-/* -------------------------------------------------- */
-/* helpers                                            */
-/* -------------------------------------------------- */
+/* ---------- helpers ---------- */
 function normalizeBase(s) {
   return String(s || "").trim().replace(/\/+$/, "");
 }
-
 function parseLock(v) {
   return v === true || v === "true" || v === 1 || v === "1";
 }
 
-function pickCatalogTitle(song, slot) {
-  const tj = song?.titleJson;
-  const fromJson = typeof tj === "object" ? String(tj?.title || "").trim() : "";
-  const fromTitle = String(song?.title || "").trim();
-  return fromJson || fromTitle || `Song ${slot}`;
-}
-
-function buildPlaylistFromCatalog(project) {
-  const songs = Array.isArray(project?.catalog?.songs) ? project.catalog.songs : [];
-  const out = [];
-  for (let i = 0; i < songs.length; i++) {
-    const s = songs[i];
-    const slot = Number(s.slot || i + 1);
-    out.push({
-      id: `slot-${slot}`,
-      slot,
-      title: pickCatalogTitle(s, slot),
-      s3Key: String(s?.files?.album?.s3Key || ""),
-      duration: Number(s?.duration || 0),
-    });
-  }
-  return out;
-}
-
-/* -------------------------------------------------- */
-/* UI bits                                            */
-/* -------------------------------------------------- */
+/* ---------- lock pill ---------- */
 function LockPill({ label, locked, onToggle }) {
   return (
     <button
@@ -69,52 +45,45 @@ function LockPill({ label, locked, onToggle }) {
   );
 }
 
-/* -------------------------------------------------- */
-/* main                                               */
-/* -------------------------------------------------- */
+/* ---------- main ---------- */
 export default function Album() {
-  const { projectId: paramId } = useParams();
+  const { projectId: pid } = useParams();
   const location = useLocation();
-
-  const projectId = useMemo(() => {
-    if (paramId) return paramId;
-    const sp = new URLSearchParams(location.search || "");
-    return sp.get("projectId") || "";
-  }, [paramId, location.search]);
-
+  const projectId = pid || new URLSearchParams(location.search).get("projectId") || "";
   const API_BASE = useMemo(() => normalizeBase(import.meta.env.VITE_API_BASE), []);
 
   const [project, setProject] = useState(() => (projectId ? loadProject(projectId) : null));
 
-  /* -------- locks (independent) -------- */
+  /* locks */
   const [playlistLocked, setPlaylistLocked] = useState(false);
   const [metaLocked, setMetaLocked] = useState(false);
   const [coverLocked, setCoverLocked] = useState(false);
 
-  /* -------- album meta -------- */
+  /* album meta */
   const [albumMeta, setAlbumMeta] = useState({
     title: "",
     artist: "",
     releaseDate: "",
   });
 
-  /* -------- playlist -------- */
+  /* playlist */
   const [playlist, setPlaylist] = useState([]);
   const [dragIndex, setDragIndex] = useState(null);
 
-  /* -------- player -------- */
+  /* cover */
+  const [coverPreview, setCoverPreview] = useState("");
+  const coverUrlRef = useRef("");
+
+  /* player */
   const audioRef = useRef(null);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState(0);
   const [dur, setDur] = useState(0);
 
-  /* -------------------------------------------------- */
-  /* init                                               */
-  /* -------------------------------------------------- */
+  /* ---------- init ---------- */
   useEffect(() => {
     if (!projectId) return;
-
     const stored = loadProject(projectId);
     if (!stored) return;
 
@@ -131,22 +100,15 @@ export default function Album() {
       releaseDate: album.meta?.releaseDate || "",
     });
 
-    const pl =
-      Array.isArray(album.songs) && album.songs.length
-        ? album.songs
-        : buildPlaylistFromCatalog(stored);
-
-    setPlaylist(pl);
+    setPlaylist(Array.isArray(album.songs) ? album.songs : []);
+    setCoverPreview(album.cover?.localPreviewUrl || "");
     setProject(stored);
   }, [projectId]);
 
-  /* -------------------------------------------------- */
-  /* player events                                      */
-  /* -------------------------------------------------- */
+  /* ---------- audio ---------- */
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
-
     const onTime = () => setTime(a.currentTime || 0);
     const onDur = () => setDur(Number.isFinite(a.duration) ? a.duration : 0);
     const onEnd = () => playNext();
@@ -154,7 +116,6 @@ export default function Album() {
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("loadedmetadata", onDur);
     a.addEventListener("ended", onEnd);
-
     return () => {
       a.removeEventListener("timeupdate", onTime);
       a.removeEventListener("loadedmetadata", onDur);
@@ -162,14 +123,12 @@ export default function Album() {
     };
   }, [activeIndex]);
 
-  /* -------------------------------------------------- */
-  /* playback                                           */
-  /* -------------------------------------------------- */
+  /* ---------- playback ---------- */
   async function playIndex(idx) {
     const item = playlist[idx];
-    if (!item?.s3Key) return;
+    if (!item?.file?.s3Key) return;
 
-    const url = await fetchPlaybackUrl({ apiBase: API_BASE, s3Key: item.s3Key });
+    const url = await fetchPlaybackUrl({ apiBase: API_BASE, s3Key: item.file.s3Key });
     const a = audioRef.current;
     if (!a) return;
 
@@ -198,19 +157,15 @@ export default function Album() {
   function playPrev() {
     if (activeIndex > 0) playIndex(activeIndex - 1);
   }
-
   function playNext() {
     if (activeIndex < playlist.length - 1) playIndex(activeIndex + 1);
   }
 
-  /* -------------------------------------------------- */
-  /* drag & drop (playlist only)                         */
-  /* -------------------------------------------------- */
+  /* ---------- drag ---------- */
   function onDragStart(i) {
     if (playlistLocked) return;
     setDragIndex(i);
   }
-
   function onDrop(i) {
     if (playlistLocked || dragIndex === null) return;
     const next = [...playlist];
@@ -221,38 +176,37 @@ export default function Album() {
 
     const nextProject = {
       ...project,
-      album: {
-        ...(project.album || {}),
-        songs: next,
-      },
+      album: { ...(project.album || {}), songs: next },
     };
     saveProject(projectId, nextProject);
     setProject(nextProject);
   }
 
-  /* -------------------------------------------------- */
-  /* album meta save                                     */
-  /* -------------------------------------------------- */
-  function saveAlbumMeta(next) {
-    if (metaLocked) return;
+  /* ---------- cover upload ---------- */
+  function setCoverFile(file) {
+    if (coverLocked || !file) return;
+
+    if (coverUrlRef.current) URL.revokeObjectURL(coverUrlRef.current);
+    const url = URL.createObjectURL(file);
+    coverUrlRef.current = url;
+    setCoverPreview(url);
+
     const nextProject = {
       ...project,
       album: {
         ...(project.album || {}),
-        meta: next,
+        cover: { localPreviewUrl: url },
       },
     };
     saveProject(projectId, nextProject);
     setProject(nextProject);
   }
 
-  /* -------------------------------------------------- */
-  /* render                                             */
-  /* -------------------------------------------------- */
   if (!project) return <div style={{ padding: 24 }}>Loading Album…</div>;
 
-  const totalAlbumTime = playlist.reduce((a, b) => a + Number(b.duration || 0), 0);
+  const totalAlbumTime = playlist.reduce((a, b) => a + Number(b?.duration || 0), 0);
 
+  /* ---------- render ---------- */
   return (
     <div style={{ maxWidth: 1200, padding: 20 }}>
       <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 10 }}>
@@ -260,113 +214,78 @@ export default function Album() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-        {/* LEFT COLUMN */}
+        {/* LEFT COLUMN — PLAYLIST */}
         <div>
-          <div style={{ marginBottom: 10 }}>
-            <LockPill label="Playlist" locked={playlistLocked} onToggle={() => setPlaylistLocked((v) => !v)} />
-          </div>
-
-          {playlist.map((t, i) => (
-            <div
-              key={t.id}
-              draggable={!playlistLocked}
-              onDragStart={() => onDragStart(i)}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={() => onDrop(i)}
-              onClick={() => playIndex(i)}
-              style={{
-                padding: 10,
-                marginBottom: 6,
-                borderRadius: 10,
-                border: "1px solid #ddd",
-                background: i === activeIndex ? "#eef2ff" : "#fff",
-                cursor: "pointer",
-                display: "flex",
-                justifyContent: "space-between",
-              }}
-            >
-              <div>
-                {i + 1}. {t.title}
+          <LockPill label="Playlist" locked={playlistLocked} onToggle={() => setPlaylistLocked(v => !v)} />
+          <div style={{ marginTop: 10 }}>
+            {playlist.map((t, i) => (
+              <div
+                key={i}
+                draggable={!playlistLocked}
+                onDragStart={() => onDragStart(i)}
+                onDragOver={e => e.preventDefault()}
+                onDrop={() => onDrop(i)}
+                onClick={() => playIndex(i)}
+                style={{
+                  padding: 10,
+                  marginBottom: 6,
+                  borderRadius: 10,
+                  border: "1px solid #ddd",
+                  background: i === activeIndex ? "#eef2ff" : "#fff",
+                  cursor: "pointer",
+                  display: "flex",
+                  justifyContent: "space-between",
+                }}
+              >
+                <div>{i + 1}. {t.title}</div>
+                <div style={{ fontFamily: "monospace", fontSize: 12 }}>{fmtTime(t.duration || 0)}</div>
               </div>
-              <div style={{ fontFamily: "monospace", fontSize: 12 }}>{fmtTime(t.duration || 0)}</div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
 
         {/* RIGHT COLUMN */}
         <div>
-          {/* PLAYER */}
+          {/* PLAYER CARD */}
           <div style={{ border: "1px solid #ddd", borderRadius: 14, padding: 14 }}>
-            <div style={{ fontWeight: 900, marginBottom: 8 }}>Player</div>
-
+            <div style={{ fontWeight: 900 }}>Player</div>
             <audio ref={audioRef} />
-
-            <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
+            <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
               <button onClick={playPrev}>Prev</button>
               <button onClick={togglePlay}>{playing ? "Pause" : "Play"}</button>
               <button onClick={playNext}>Next</button>
             </div>
-
-            <div style={{ fontFamily: "monospace", fontSize: 12 }}>
+            <div style={{ fontFamily: "monospace", fontSize: 12, marginTop: 6 }}>
               {fmtTime(time)} / {fmtTime(dur)}
             </div>
-
             <input
               type="range"
               min={0}
               max={Math.floor(dur || 0)}
               value={Math.floor(time || 0)}
-              onChange={(e) => {
-                const a = audioRef.current;
-                if (a) a.currentTime = Number(e.target.value || 0);
-              }}
+              onChange={e => audioRef.current && (audioRef.current.currentTime = Number(e.target.value))}
               style={{ width: "100%" }}
             />
           </div>
 
-          {/* ALBUM META */}
+          {/* ALBUM META CARD */}
           <div style={{ marginTop: 14, border: "1px solid #ddd", borderRadius: 14, padding: 14 }}>
-            <LockPill label="Album Meta" locked={metaLocked} onToggle={() => setMetaLocked((v) => !v)} />
+            <LockPill label="Album Meta" locked={metaLocked} onToggle={() => setMetaLocked(v => !v)} />
+            <input disabled={metaLocked} placeholder="Album Title" value={albumMeta.title} style={{ width: "100%", marginTop: 8 }} />
+            <input disabled={metaLocked} placeholder="Artist Name" value={albumMeta.artist} style={{ width: "100%", marginTop: 8 }} />
+            <input disabled={metaLocked} placeholder="Release Date" value={albumMeta.releaseDate} style={{ width: "100%", marginTop: 8 }} />
+            <div style={{ marginTop: 8, fontSize: 12 }}>Total Time: <strong>{fmtTime(totalAlbumTime)}</strong></div>
+          </div>
 
-            <input
-              disabled={metaLocked}
-              placeholder="Album Title"
-              value={albumMeta.title}
-              onChange={(e) => {
-                const next = { ...albumMeta, title: e.target.value };
-                setAlbumMeta(next);
-                saveAlbumMeta(next);
-              }}
-              style={{ width: "100%", marginTop: 8 }}
-            />
-
-            <input
-              disabled={metaLocked}
-              placeholder="Artist Name"
-              value={albumMeta.artist}
-              onChange={(e) => {
-                const next = { ...albumMeta, artist: e.target.value };
-                setAlbumMeta(next);
-                saveAlbumMeta(next);
-              }}
-              style={{ width: "100%", marginTop: 8 }}
-            />
-
-            <input
-              disabled={metaLocked}
-              placeholder="Release Date"
-              value={albumMeta.releaseDate}
-              onChange={(e) => {
-                const next = { ...albumMeta, releaseDate: e.target.value };
-                setAlbumMeta(next);
-                saveAlbumMeta(next);
-              }}
-              style={{ width: "100%", marginTop: 8 }}
-            />
-
-            <div style={{ marginTop: 8, fontSize: 12 }}>
-              Total Time: <strong>{fmtTime(totalAlbumTime)}</strong>
-            </div>
+          {/* COVER CARD */}
+          <div style={{ marginTop: 14, border: "1px solid #ddd", borderRadius: 14, padding: 14 }}>
+            <LockPill label="Album Cover" locked={coverLocked} onToggle={() => setCoverLocked(v => !v)} />
+            {!coverLocked && (
+              <input type="file" accept="image/*" onChange={e => setCoverFile(e.target.files?.[0])} />
+            )}
+            {coverPreview && (
+              <img src={coverPreview} alt="cover" style={{ marginTop: 10, maxWidth: "100%", borderRadius: 10 }} />
+            )}
           </div>
         </div>
       </div>
