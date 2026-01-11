@@ -997,7 +997,6 @@ async function masterSaveAlbum() {
             <div style={{ fontSize: 18, fontWeight: 950 }}>Master Save</div>
             <div style={{ marginTop: 6, fontFamily: styles.mono, fontSize: 12, opacity: 0.8 }}>
               {project?.album?.masterSave?.savedAt ? `Album Master Saved @ ${project.album.masterSave.savedAt}` : "—"}
-Album Master Saved @ 2026-01-11T06:08:07.086            </div>
           </div>
 
           <button
@@ -1013,7 +1012,7 @@ Album Master Saved @ 2026-01-11T06:08:07.086            </div>
       </div>
     </div>
   );
-
+}
 
 /* ---------------- styles ---------------- */
 const styles = {
