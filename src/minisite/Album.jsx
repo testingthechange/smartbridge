@@ -624,6 +624,8 @@ export default function Album() {
 
   // Master Save snapshot (correct shape) + 2-tier confirm + final alert
   async function masterSaveAlbum() {
+    console.log("ALBUM MASTER SAVE CLICKED");
+
     if (msBusy) return;
 
     const first = window.confirm("Are you sure you want to Master Save Album?\n\nThis writes the Album snapshot.");
