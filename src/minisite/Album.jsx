@@ -35,9 +35,13 @@ export default function Album() {
   if (!projectId) return <div style={{ padding: 24 }}>Missing projectId</div>;
   if (!project) return <div style={{ padding: 24 }}>No project loaded</div>;
 
+  /* ---------- Catalog mirror ---------- */
+
   const catalogSongs = Array.isArray(project?.catalog?.songs)
     ? project.catalog.songs
     : [];
+
+  /* ---------- Album Meta ---------- */
 
   const meta = project?.album?.meta || {};
   const albumTitle = meta.albumTitle || "";
@@ -59,6 +63,28 @@ export default function Album() {
     saveProject(projectId, next);
     setTick((n) => n + 1);
   }
+
+  /* ---------- Cover ---------- */
+
+  const coverUrl = project?.album?.cover?.url || "";
+
+  function setCoverUrl(value) {
+    const next = {
+      ...project,
+      album: {
+        ...(project.album || {}),
+        cover: {
+          ...(project.album?.cover || {}),
+          url: value,
+        },
+      },
+      updatedAt: new Date().toISOString(),
+    };
+    saveProject(projectId, next);
+    setTick((n) => n + 1);
+  }
+
+  /* ---------- Master Save ---------- */
 
   async function onMasterSave() {
     if (busy) return;
@@ -124,89 +150,70 @@ export default function Album() {
       </div>
 
       {/* Album Meta */}
-      <div
-        style={{
-          marginTop: 28,
-          padding: 16,
-          border: "1px solid #e5e7eb",
-          borderRadius: 12,
-        }}
-      >
+      <div style={{ marginTop: 28, padding: 16, border: "1px solid #e5e7eb", borderRadius: 12 }}>
         <h3>Album Meta</h3>
 
         <div style={{ marginTop: 12 }}>
           <div style={{ fontSize: 12, fontWeight: 700 }}>Album Title</div>
-          <input
-            value={albumTitle}
-            onChange={(e) => setMetaField("albumTitle", e.target.value)}
-            style={{ width: "100%", padding: 8 }}
-          />
+          <input value={albumTitle} onChange={(e) => setMetaField("albumTitle", e.target.value)} style={{ width: "100%", padding: 8 }} />
         </div>
 
         <div style={{ marginTop: 12 }}>
           <div style={{ fontSize: 12, fontWeight: 700 }}>Artist Name</div>
-          <input
-            value={artistName}
-            onChange={(e) => setMetaField("artistName", e.target.value)}
-            style={{ width: "100%", padding: 8 }}
-          />
+          <input value={artistName} onChange={(e) => setMetaField("artistName", e.target.value)} style={{ width: "100%", padding: 8 }} />
         </div>
 
         <div style={{ marginTop: 12 }}>
           <div style={{ fontSize: 12, fontWeight: 700 }}>Release Date</div>
-          <input
-            type="date"
-            value={releaseDate}
-            onChange={(e) => setMetaField("releaseDate", e.target.value)}
-            style={{ padding: 8 }}
-          />
+          <input type="date" value={releaseDate} onChange={(e) => setMetaField("releaseDate", e.target.value)} style={{ padding: 8 }} />
         </div>
       </div>
 
+      {/* Cover */}
+      <div style={{ marginTop: 28, padding: 16, border: "1px solid #e5e7eb", borderRadius: 12 }}>
+        <h3>Cover</h3>
+
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 12, fontWeight: 700 }}>Cover Image URL</div>
+          <input
+            value={coverUrl}
+            onChange={(e) => setCoverUrl(e.target.value)}
+            placeholder="https://…"
+            style={{ width: "100%", padding: 8 }}
+          />
+        </div>
+
+        {coverUrl ? (
+          <img
+            src={coverUrl}
+            alt="cover"
+            style={{ marginTop: 12, maxWidth: 240, borderRadius: 8, border: "1px solid #e5e7eb" }}
+          />
+        ) : null}
+      </div>
+
       {/* Master Save */}
-      <div
-        style={{
-          marginTop: 32,
-          paddingTop: 16,
-          borderTop: "1px solid #e5e7eb",
-        }}
-      >
+      <div style={{ marginTop: 32, paddingTop: 16, borderTop: "1px solid #e5e7eb" }}>
         <button
           type="button"
           onClick={onMasterSave}
           disabled={busy}
-          style={{
-            padding: "12px 16px",
-            fontWeight: 900,
-            cursor: busy ? "not-allowed" : "pointer",
-          }}
+          style={{ padding: "12px 16px", fontWeight: 900 }}
         >
           {busy ? "Saving…" : "Master Save Album"}
         </button>
 
         {project?.master?.isMasterSaved ? (
-          <div style={{ marginTop: 10, color: "#065f46", fontWeight: 900 }}>
-            ✅ Album Master Saved
-          </div>
+          <div style={{ marginTop: 10, color: "#065f46", fontWeight: 900 }}>✅ Album Master Saved</div>
         ) : null}
 
         {project?.master?.lastSnapshotKey ? (
-          <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>
+          <div style={{ marginTop: 6, fontSize: 12 }}>
             Snapshot: <code>{project.master.lastSnapshotKey}</code>
           </div>
         ) : null}
 
-        {project?.master?.masterSavedAt ? (
-          <div style={{ marginTop: 4, fontSize: 12, opacity: 0.7 }}>
-            Saved @ {project.master.masterSavedAt}
-          </div>
-        ) : null}
-
-        {err ? (
-          <div style={{ marginTop: 10, color: "#991b1b", fontSize: 12 }}>
-            {err}
-          </div>
-        ) : null}
+        {err ? <div style={{ marginTop: 10, color: "#991b1b", fontSize: 12 }}>{err}</div> : null}
       </div>
     </div>
   );
