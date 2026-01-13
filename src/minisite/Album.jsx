@@ -829,7 +829,14 @@ async function masterSaveAlbum() {
           {/* (R1) ALBUM META CARD */}
           <Card
             title="Album Meta"
-            right={<LockPill locked={metaLocked} onToggle={() => toggleLock("metaComplete")} disabled={lockBusy} label="Meta" />}
+            right={
+              <LockPill
+                locked={metaLocked}
+                onToggle={() => toggleLock("metaComplete")}
+                disabled={lockBusy}
+                label="Meta"
+              />
+            }
           >
             <div style={{ fontSize: 12, opacity: 0.72, lineHeight: 1.5 }}>
               {metaLocked ? "LOCKED — album meta is read-only." : "Edit album-level fields."}
@@ -840,15 +847,21 @@ async function masterSaveAlbum() {
                 <div style={{ display: "grid", gap: 10 }}>
                   <div>
                     <div style={styles.fieldLabel}>Album Title</div>
-                    <div style={{ fontFamily: styles.mono, fontSize: 13, fontWeight: 900, opacity: 0.85 }}>{albumTitle || "—"}</div>
+                    <div style={{ fontFamily: styles.mono, fontSize: 13, fontWeight: 900, opacity: 0.85 }}>
+                      {albumTitle || "—"}
+                    </div>
                   </div>
                   <div>
                     <div style={styles.fieldLabel}>Artist Name</div>
-                    <div style={{ fontFamily: styles.mono, fontSize: 13, fontWeight: 900, opacity: 0.85 }}>{artistName || "—"}</div>
+                    <div style={{ fontFamily: styles.mono, fontSize: 13, fontWeight: 900, opacity: 0.85 }}>
+                      {artistName || "—"}
+                    </div>
                   </div>
                   <div>
                     <div style={styles.fieldLabel}>Release Date</div>
-                    <div style={{ fontFamily: styles.mono, fontSize: 13, fontWeight: 900, opacity: 0.85 }}>{releaseDate || "—"}</div>
+                    <div style={{ fontFamily: styles.mono, fontSize: 13, fontWeight: 900, opacity: 0.85 }}>
+                      {releaseDate || "—"}
+                    </div>
                   </div>
                   <div>
                     <div style={styles.fieldLabel}>Album Total Time</div>
@@ -900,10 +913,19 @@ async function masterSaveAlbum() {
           {/* (R2) COVER UPLOAD CARD */}
           <Card
             title="Cover"
-            right={<LockPill locked={coverLocked} onToggle={() => toggleLock("coverComplete")} disabled={lockBusy} label="Cover" />}
+            right={
+              <LockPill
+                locked={coverLocked}
+                onToggle={() => toggleLock("coverComplete")}
+                disabled={lockBusy}
+                label="Cover"
+              />
+            }
           >
             <div style={{ fontSize: 12, opacity: 0.72, lineHeight: 1.5 }}>
-              {coverLocked ? "LOCKED — cover changes disabled." : "Upload a cover image (local preview) and/or paste s3Key."}
+              {coverLocked
+                ? "LOCKED — cover changes disabled."
+                : "Upload a cover image (local preview) and/or paste s3Key."}
             </div>
 
             <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
@@ -919,8 +941,18 @@ async function masterSaveAlbum() {
               </div>
 
               <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                <input type="file" accept="image/*" disabled={coverLocked} onChange={(e) => uploadCoverFile(e.target.files?.[0] || null)} />
-                <button type="button" onClick={clearCover} disabled={coverLocked} style={coverLocked ? styles.softBtnDisabled : styles.softBtn}>
+                <input
+                  type="file"
+                  accept="image/*"
+                  disabled={coverLocked}
+                  onChange={(e) => uploadCoverFile(e.target.files?.[0] || null)}
+                />
+                <button
+                  type="button"
+                  onClick={clearCover}
+                  disabled={coverLocked}
+                  style={coverLocked ? styles.softBtnDisabled : styles.softBtn}
+                >
                   Clear
                 </button>
               </div>
@@ -930,38 +962,44 @@ async function masterSaveAlbum() {
                   <img
                     src={coverPreview}
                     alt="cover preview"
-                    style={{ maxWidth: 320, width: "100%", borderRadius: 12, border: "1px solid #e5e7eb" }}
+                    style={{
+                      maxWidth: 320,
+                      width: "100%",
+                      borderRadius: 12,
+                      border: "1px solid #e5e7eb",
+                    }}
                   />
                 </div>
               ) : null}
             </div>
           </Card>
         </div>
-      </div>
 
-      {/* Master Save — NOT in a card (button lower right) */}
-      <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid #e5e7eb" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
-          <div>
-            <div style={{ fontSize: 18, fontWeight: 950 }}>Master Save</div>
-            <div style={{ marginTop: 6, fontFamily: styles.mono, fontSize: 12, opacity: 0.8 }}>
-              {project?.album?.masterSave?.savedAt ? `Album Master Saved @ ${project.album.masterSave.savedAt}` : "—"}
-            </div>
+
+    <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid #e5e7eb" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 950 }}>Master Save</div>
+          <div style={{ marginTop: 6, fontFamily: styles.mono, fontSize: 12, opacity: 0.8 }}>
+            {project?.album?.masterSave?.savedAt
+              ? `Album Master Saved @ ${project.album.masterSave.savedAt}`
+              : "—"}
           </div>
+        </div>
 
-          <button
-  type="button"
-  onClick={masterSaveAlbum}
-  disabled={msBusy}
-  style={msBusy ? styles.primaryBtnDisabled : styles.primaryBtn}
-  title="Master Save"
->
-  Master Save
-</button>
-</div>
+        <button
+          type="button"
+          onClick={masterSaveAlbum}
+          disabled={msBusy}
+          style={msBusy ? styles.primaryBtnDisabled : styles.primaryBtn}
+          title="Master Save"
+        >
+          Master Save
+        </button>
       </div>
     </div>
-  );
+  </div>
+);
 }
 
 /* ---------------- styles ---------------- */
