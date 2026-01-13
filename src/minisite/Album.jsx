@@ -1,7 +1,7 @@
 // src/minisite/Album.jsx
 import React, { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
-import { masterSaveMiniSite } from "./masterSaveMiniSite";
+import { masterSaveMiniSite } from "../lib/masterSaveMiniSite.js";
 
 function loadProject(projectId) {
   try {
