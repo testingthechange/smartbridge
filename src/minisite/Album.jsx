@@ -65,6 +65,19 @@ function Card({ title, right, children }) {
   );
 }
 
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    try {
+      const fr = new FileReader();
+      fr.onerror = () => reject(new Error("Failed to read file."));
+      fr.onload = () => resolve(String(fr.result || ""));
+      fr.readAsDataURL(file);
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
 /* --------- UI bits --------- */
 function LockPill({ label, locked, onToggle, disabled, note }) {
   // green = UNLOCKED, red = LOCKED
@@ -476,9 +489,11 @@ export default function Album() {
     persistProject(next);
   }
 
-  function uploadCoverFile(file) {
+  async function uploadCoverFile(file) {
     if (coverLocked) return;
     if (!file) return;
+
+    setErr("");
 
     const old = String(lastPreviewUrlRef.current || "");
     if (old.startsWith("blob:")) {
@@ -487,21 +502,26 @@ export default function Album() {
       } catch {}
     }
 
-    const url = URL.createObjectURL(file);
-    lastPreviewUrlRef.current = url;
+    try {
+      // Store a persistent data URL so preview does not vanish after toggles/navigation/reload.
+      const dataUrl = await readFileAsDataUrl(file);
+      lastPreviewUrlRef.current = dataUrl;
 
-    const current = rereadProject() || project;
-    if (!current) return;
+      const current = rereadProject() || project;
+      if (!current) return;
 
-    const next = {
-      ...current,
-      album: {
-        ...(current.album || {}),
-        cover: { ...(current.album?.cover || {}), localPreviewUrl: url },
-      },
-      updatedAt: new Date().toISOString(),
-    };
-    persistProject(next);
+      const next = {
+        ...current,
+        album: {
+          ...(current.album || {}),
+          cover: { ...(current.album?.cover || {}), localPreviewUrl: dataUrl },
+        },
+        updatedAt: new Date().toISOString(),
+      };
+      persistProject(next);
+    } catch (e) {
+      setErr(e?.message || "Cover upload failed");
+    }
   }
 
   function clearCover() {
@@ -845,10 +865,10 @@ export default function Album() {
                 <div>
                   <div style={styles.fieldLabel}>Release Date</div>
                   <input
+                    type="date"
                     value={releaseDate}
                     onChange={(e) => setAlbumMetaField("releaseDate", e.target.value)}
                     style={styles.input}
-                    placeholder="YYYY-MM-DD"
                   />
                 </div>
                 <div>
