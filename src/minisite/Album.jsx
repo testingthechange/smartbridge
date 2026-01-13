@@ -950,15 +950,15 @@ async function masterSaveAlbum() {
           </div>
 
           <button
-            type="button"
-            onClick={masterSaveAlbum}
-            disabled={msBusy}
-            style={msBusy ? styles.primaryBtnDisabled : styles.primaryBtn}
-            title="Master Save"
-          >
-            Master Save
-          </button>
-        </div>
+  type="button"
+  onClick={masterSaveAlbum}
+  disabled={msBusy}
+  style={msBusy ? styles.primaryBtnDisabled : styles.primaryBtn}
+  title="Master Save"
+>
+  Master Save
+</button>
+</div>
       </div>
     </div>
   );
