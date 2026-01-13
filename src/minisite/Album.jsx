@@ -624,80 +624,80 @@ export default function Album() {
 
   // Master Save snapshot (correct shape) + 2-tier confirm + final alert
   async function masterSaveAlbum() {
-    console.log("ALBUM MASTER SAVE CLICKED");
+  console.log("ALBUM MASTER SAVE CLICKED");
 
-    if (msBusy) return;
+  if (msBusy) return;
 
-    const first = window.confirm("Are you sure you want to Master Save Album?\n\nThis writes the Album snapshot.");
-    if (!first) return;
+  const first = window.confirm("Are you sure you want to Master Save Album?\n\nThis writes the Album snapshot.");
+  if (!first) return;
 
-    const second = window.confirm("Last chance.\n\nDouble-check everything before saving.");
-    if (!second) return;
+  const second = window.confirm("Last chance.\n\nDouble-check everything before saving.");
+  if (!second) return;
 
-    setMsBusy(true);
-    setErr("");
+  setMsBusy(true);
+  setErr("");
 
-    try {
-      const current = rereadProject() || project;
-      if (!current) throw new Error("No project loaded.");
+  try {
+    const current = rereadProject() || project;
+    if (!current) throw new Error("No project loaded.");
 
-      const snap = {
-        buildStamp: ALBUM_BUILD_STAMP,
-        savedAt: new Date().toISOString(),
-        projectId,
-        locks: {
-          playlistComplete: Boolean(locksUI.playlistComplete),
-          metaComplete: Boolean(locksUI.metaComplete),
-          coverComplete: Boolean(locksUI.coverComplete),
+    const snap = {
+      buildStamp: ALBUM_BUILD_STAMP,
+      savedAt: new Date().toISOString(),
+      projectId,
+      locks: {
+        playlistComplete: Boolean(locksUI.playlistComplete),
+        metaComplete: Boolean(locksUI.metaComplete),
+        coverComplete: Boolean(locksUI.coverComplete),
+      },
+      playlistOrder: Array.isArray(playlistOrder) ? [...playlistOrder] : [],
+      songs: Array.isArray(playlist) ? playlist.map((t) => ({ ...t, file: { ...(t.file || {}) } })) : [],
+      meta: { ...(current?.album?.meta || {}) },
+      cover: { ...(current?.album?.cover || {}) },
+      totalSeconds: Number(totalSeconds || 0),
+    };
+
+    const next = {
+      ...current,
+      album: {
+        ...(current.album || {}),
+        masterSave: snap,
+      },
+      updatedAt: new Date().toISOString(),
+    };
+
+    persistProject(next);
+
+    // Post full project to backend to get a real snapshotKey (same as Catalog)
+    const res = await masterSaveMiniSite({ projectId, project: next });
+    const snapshotKey = String(res?.snapshotKey || "");
+    const savedAt = new Date().toISOString();
+
+    if (snapshotKey) {
+      const updated = {
+        ...next,
+        master: {
+          ...(next.master || {}),
+          isMasterSaved: true,
+          masterSavedAt: savedAt,
+          lastSnapshotKey: snapshotKey,
         },
-        playlistOrder: Array.isArray(playlistOrder) ? [...playlistOrder] : [],
-        songs: Array.isArray(playlist) ? playlist.map((t) => ({ ...t, file: { ...(t.file || {}) } })) : [],
-        meta: { ...(current?.album?.meta || {}) },
-        cover: { ...(current?.album?.cover || {}) },
-        totalSeconds: Number(totalSeconds || 0),
-      };
-
-      const next = {
-        ...current,
-        album: {
-          ...(current.album || {}),
-          masterSave: snap,
+        publish: {
+          ...(next.publish || {}),
+          snapshotKey,
         },
-        updatedAt: new Date().toISOString(),
+        updatedAt: savedAt,
       };
-
-      persistProject(next);
-
-      const res = await masterSaveMiniSite({ projectId, project: next });
-      const snapshotKey = String(res?.snapshotKey || "");
-      const savedAt = new Date().toISOString();
-
-      if (snapshotKey) {
-        const updated = {
-          ...next,
-          master: {
-            ...(next.master || {}),
-            isMasterSaved: true,
-            masterSavedAt: savedAt,
-            lastSnapshotKey: snapshotKey,
-          },
-          publish: {
-            ...(next.publish || {}),
-            snapshotKey,
-          },
-          updatedAt: savedAt,
-        };
-        persistProject(updated);
-      }
-
-
-      window.alert("Album Master Save confirmed.\n\nSnapshot written to album.masterSave.");
-    } catch (e) {
-      setErr(e?.message || "Master Save failed");
-    } finally {
-      setMsBusy(false);
+      persistProject(updated);
     }
+
+    window.alert("Album Master Save confirmed.\n\nSnapshot written to album.masterSave.");
+  } catch (e) {
+    setErr(e?.message || "Master Save failed");
+  } finally {
+    setMsBusy(false);
   }
+}
 
   if (!projectId) return <div style={{ padding: 24 }}>Missing projectId</div>;
   if (!project) return <div style={{ padding: 24 }}>Loading Album…</div>;
