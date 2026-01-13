@@ -1,157 +1,124 @@
-import React, { useEffect, useState } from "react";
+// src/minisite/Album.jsx
+import React, { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
-import { loadProject, saveProject } from "./catalog/catalogCore.js";
-import { masterSaveMiniSite } from "../lib/masterSaveMiniSite.js";
+import { masterSaveMiniSite } from "./masterSaveMiniSite";
 
-/**
- * MINIMAL ALBUM — RESET VERSION
- * Purpose:
- * - Prove locks
- * - Prove Master Save
- * - Produce valid snapshotKey for Publish
- */
+function loadProject(projectId) {
+  try {
+    const raw = localStorage.getItem(`project_${projectId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveProject(projectId, project) {
+  localStorage.setItem(`project_${projectId}`, JSON.stringify(project));
+}
 
 export default function Album() {
   const { projectId } = useParams();
-
-  const [project, setProject] = useState(null);
-  const [locks, setLocks] = useState({
-    playlist: false,
-    meta: false,
-    cover: false,
-  });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [savedAt, setSavedAt] = useState("");
 
-  useEffect(() => {
-    if (!projectId) return;
-    const p = loadProject(projectId);
-    if (!p) return;
+  const project = useMemo(() => loadProject(projectId), [projectId]);
 
-    const next = {
-      ...p,
-      album: {
-        ...(p.album || {}),
-        locks: {
-          playlist: !!p.album?.locks?.playlist,
-          meta: !!p.album?.locks?.meta,
-          cover: !!p.album?.locks?.cover,
-        },
-        junk: p.album?.junk || {
-          playlist: "FAKE PLAYLIST DATA",
-          meta: "FAKE META DATA",
-          cover: "FAKE COVER DATA",
-        },
-      },
-    };
+  if (!projectId) return <div style={{ padding: 24 }}>Missing projectId</div>;
+  if (!project) return <div style={{ padding: 24 }}>No project loaded</div>;
 
-    saveProject(projectId, next);
-    setProject(next);
-    setLocks(next.album.locks);
-  }, [projectId]);
+  const catalogSongs = Array.isArray(project?.catalog?.songs)
+    ? project.catalog.songs
+    : [];
 
-  function toggleLock(key) {
-    const nextLocks = { ...locks, [key]: !locks[key] };
-    const next = {
-      ...project,
-      album: {
-        ...(project.album || {}),
-        locks: nextLocks,
-      },
-    };
-    saveProject(projectId, next);
-    setProject(next);
-    setLocks(nextLocks);
-  }
-
-  async function masterSaveAlbum() {
+  async function onMasterSave() {
     if (busy) return;
     setBusy(true);
     setErr("");
 
     try {
-      const current = loadProject(projectId);
-      if (!current) throw new Error("No project");
-
-      // write album master marker
-      const next = {
-        ...current,
-        album: {
-          ...(current.album || {}),
-          masterSave: {
-            savedAt: new Date().toISOString(),
-            locks,
-            junk: current.album?.junk,
-          },
-        },
-      };
-      saveProject(projectId, next);
-
-      // POST FULL PROJECT (same as Catalog)
       const res = await masterSaveMiniSite({
         projectId,
-        project: next,
+        project,
       });
 
       const snapshotKey = String(res?.snapshotKey || "");
+      const now = new Date().toISOString();
+
       if (!snapshotKey) throw new Error("No snapshotKey returned");
 
-      const final = {
-        ...next,
+      const next = {
+        ...project,
         master: {
-          ...(next.master || {}),
+          ...(project.master || {}),
           isMasterSaved: true,
+          masterSavedAt: now,
           lastSnapshotKey: snapshotKey,
-          masterSavedAt: new Date().toISOString(),
         },
         publish: {
-          ...(next.publish || {}),
+          ...(project.publish || {}),
           snapshotKey,
         },
+        updatedAt: now,
       };
 
-      saveProject(projectId, final);
-      setProject(final);
-      alert("Album Master Saved");
+      saveProject(projectId, next);
+      setSavedAt(now);
+      alert("Album Master Save OK");
     } catch (e) {
-      setErr(e.message);
+      setErr(e?.message || "Master Save failed");
     } finally {
       setBusy(false);
     }
   }
 
-  if (!project) return <div>Loading Album…</div>;
-
   return (
-    <div style={{ maxWidth: 900 }}>
-      <h1>Album (Reset)</h1>
-      <div>Project {projectId}</div>
+    <div style={{ maxWidth: 900, padding: 24 }}>
+      <h2>Album (v0)</h2>
+      <div style={{ opacity: 0.7, fontSize: 12 }}>Project {projectId}</div>
 
-      {err && <div style={{ color: "red" }}>{err}</div>}
+      <div style={{ marginTop: 20 }}>
+        <h3>Catalog mirror</h3>
+        {catalogSongs.length === 0 ? (
+          <div style={{ opacity: 0.6 }}>No catalog songs</div>
+        ) : (
+          <ul>
+            {catalogSongs.map((s) => (
+              <li key={s.slot}>
+                #{s.slot} — {s.title || "—"}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
 
-      {["playlist", "meta", "cover"].map((k) => (
-        <div
-          key={k}
+      <div style={{ marginTop: 30, paddingTop: 16, borderTop: "1px solid #e5e7eb" }}>
+        <button
+          type="button"
+          onClick={onMasterSave}
+          disabled={busy}
           style={{
-            border: "1px solid #ddd",
-            padding: 12,
-            marginTop: 12,
+            padding: "12px 16px",
+            fontWeight: 800,
+            cursor: busy ? "not-allowed" : "pointer",
           }}
         >
-          <strong>{k.toUpperCase()}</strong>
-          <div style={{ marginTop: 6 }}>
-            Lock: {locks[k] ? "LOCKED" : "UNLOCKED"}
-          </div>
-          <button onClick={() => toggleLock(k)} style={{ marginTop: 6 }}>
-            Toggle Lock
-          </button>
-        </div>
-      ))}
-
-      <div style={{ marginTop: 24 }}>
-        <button onClick={masterSaveAlbum} disabled={busy}>
           {busy ? "Saving…" : "Master Save Album"}
         </button>
+
+        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>
+          {savedAt
+            ? `Album Master Saved @ ${savedAt}`
+            : project?.master?.masterSavedAt
+            ? `Album Master Saved @ ${project.master.masterSavedAt}`
+            : "—"}
+        </div>
+
+        {err ? (
+          <div style={{ marginTop: 10, color: "#991b1b", fontSize: 12 }}>
+            {err}
+          </div>
+        ) : null}
       </div>
     </div>
   );
