@@ -621,17 +621,18 @@ export default function Album() {
     if (nextIdx >= playlist.length) return;
     playIndex(nextIdx);
   }
-
-  // Master Save snapshot (correct shape) + 2-tier confirm + final alert
-  async function masterSaveAlbum() {
-  console.log("ALBUM MASTER SAVE CLICKED");
-
+// Master Save snapshot (Album) + backend snapshot (authoritative)
+async function masterSaveAlbum() {
   if (msBusy) return;
 
-  const first = window.confirm("Are you sure you want to Master Save Album?\n\nThis writes the Album snapshot.");
+  const first = window.confirm(
+    "Are you sure you want to Master Save Album?\n\nThis writes the Album snapshot."
+  );
   if (!first) return;
 
-  const second = window.confirm("Last chance.\n\nDouble-check everything before saving.");
+  const second = window.confirm(
+    "Last chance.\n\nDouble-check everything before saving."
+  );
   if (!second) return;
 
   setMsBusy(true);
@@ -641,85 +642,74 @@ export default function Album() {
     const current = rereadProject() || project;
     if (!current) throw new Error("No project loaded.");
 
-    const snap = {
+    const nowIso = new Date().toISOString();
+
+    // 1) Build Album snapshot
+    const albumSnap = {
       buildStamp: ALBUM_BUILD_STAMP,
-      savedAt: new Date().toISOString(),
+      savedAt: nowIso,
       projectId,
       locks: {
-        playlistComplete: Boolean(locksUI.playlistComplete),
-        metaComplete: Boolean(locksUI.metaComplete),
-        coverComplete: Boolean(locksUI.coverComplete),
+        playlistComplete: !!locksUI.playlistComplete,
+        metaComplete: !!locksUI.metaComplete,
+        coverComplete: !!locksUI.coverComplete,
       },
       playlistOrder: Array.isArray(playlistOrder) ? [...playlistOrder] : [],
-      songs: Array.isArray(playlist) ? playlist.map((t) => ({ ...t, file: { ...(t.file || {}) } })) : [],
-      meta: { ...(current?.album?.meta || {}) },
-      cover: { ...(current?.album?.cover || {}) },
+      songs: Array.isArray(playlist)
+        ? playlist.map((t) => ({ ...t, file: { ...(t.file || {}) } }))
+        : [],
+      meta: { ...(current.album?.meta || {}) },
+      cover: { ...(current.album?.cover || {}) },
       totalSeconds: Number(totalSeconds || 0),
     };
 
+    // 2) Update local project (album section only)
     const next = {
       ...current,
       album: {
         ...(current.album || {}),
-        masterSave: snap,
+        masterSave: albumSnap,
       },
-      updatedAt: new Date().toISOString(),
+      updatedAt: nowIso,
     };
 
     persistProject(next);
 
-    // Post full project to backend to get a real snapshotKey (same as Catalog)
+    // 3) AUTHORITATIVE STEP — post FULL project to backend
     const res = await masterSaveMiniSite({ projectId, project: next });
     const snapshotKey = String(res?.snapshotKey || "");
-    const savedAt = new Date().toISOString();
-
-    if (snapshotKey) {
-      const updated = {
-        ...next,
-        master: {
-          ...(next.master || {}),
-          isMasterSaved: true,
-          masterSavedAt: savedAt,
-          lastSnapshotKey: snapshotKey,
-        },
-        publish: {
-          ...(next.publish || {}),
-          snapshotKey,
-        },
-        updatedAt: savedAt,
-      };
-      persistProject(updated);
+    if (!snapshotKey) {
+      throw new Error("Backend did not return snapshotKey");
     }
 
-    window.alert("Album Master Save confirmed.\n\nSnapshot written to album.masterSave.");
+    // 4) Persist master flags + snapshotKey (green everywhere)
+    const finalProject = {
+      ...next,
+      master: {
+        ...(next.master || {}),
+        isMasterSaved: true,
+        masterSavedAt: nowIso,
+        lastSnapshotKey: snapshotKey,
+      },
+      publish: {
+        ...(next.publish || {}),
+        snapshotKey,
+      },
+      updatedAt: nowIso,
+    };
+
+    persistProject(finalProject);
+
+    window.alert(
+      "Album Master Save confirmed.\n\nBackend snapshot created."
+    );
   } catch (e) {
-    setErr(e?.message || "Master Save failed");
+    console.error(e);
+    setErr(e?.message || "Album Master Save failed");
   } finally {
     setMsBusy(false);
   }
 }
-
-  if (!projectId) return <div style={{ padding: 24 }}>Missing projectId</div>;
-  if (!project) return <div style={{ padding: 24 }}>Loading Album…</div>;
-
-  const albumTitle = String(project?.album?.meta?.albumTitle || "");
-  const artistName = String(project?.album?.meta?.artistName || "");
-  const releaseDate = String(project?.album?.meta?.releaseDate || "");
-
-  const coverKey = String(project?.album?.cover?.s3Key || "");
-  const coverPreview = String(project?.album?.cover?.localPreviewUrl || "");
-
-  const nowTrack = activeIndex >= 0 ? playlist[activeIndex] : null;
-
-  return (
-    <div style={{ maxWidth: 1200, padding: 18 }}>
-      {/* Header */}
-      <div style={{ paddingBottom: 10, borderBottom: "1px solid #e5e7eb" }}>
-        <div style={{ fontSize: 30, fontWeight: 950 }}>Album</div>
-        <div style={{ fontSize: 12, opacity: 0.75 }}>
-          Project <b>{projectId}</b>
-        </div>
-      </div>
 
       {busy ? <div style={{ marginTop: 10, fontWeight: 900 }}>{busy}</div> : null}
       {err ? <div style={{ marginTop: 10, color: "#991b1b", fontWeight: 900 }}>{err}</div> : null}
