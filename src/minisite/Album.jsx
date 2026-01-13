@@ -664,8 +664,29 @@ export default function Album() {
         updatedAt: new Date().toISOString(),
       };
 
-      persistProject(next); 
-      await masterSaveMiniSite({ projectId, project: next });
+      persistProject(next);
+
+      const res = await masterSaveMiniSite({ projectId, project: next });
+      const snapshotKey = String(res?.snapshotKey || "");
+      const savedAt = new Date().toISOString();
+
+      if (snapshotKey) {
+        const updated = {
+          ...next,
+          master: {
+            ...(next.master || {}),
+            isMasterSaved: true,
+            masterSavedAt: savedAt,
+            lastSnapshotKey: snapshotKey,
+          },
+          publish: {
+            ...(next.publish || {}),
+            snapshotKey,
+          },
+          updatedAt: savedAt,
+        };
+        persistProject(updated);
+      }
 
 
       window.alert("Album Master Save confirmed.\n\nSnapshot written to album.masterSave.");
