@@ -1,93 +1,125 @@
-// src/minisite/Album.jsx
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
-import { masterSaveMiniSite } from "../lib/masterSaveMiniSite.js";
+import { loadProject, saveProject, uploadSongFile } from "./catalog/catalogCore";
+import { masterSaveMiniSite } from "./masterSaveMiniSite";
 
-/* ---------- local helpers ---------- */
-
-function loadProject(projectId) {
-  try {
-    const raw = localStorage.getItem(`project_${projectId}`);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
-function saveProject(projectId, project) {
-  localStorage.setItem(`project_${projectId}`, JSON.stringify(project));
-}
-
-/* ---------- Album ---------- */
+const LOCKS_INIT = {
+  meta: false,
+  cover: false,
+  playlist: false,
+};
 
 export default function Album() {
   const { projectId } = useParams();
 
+  const [project, setProject] = useState(null);
+  const [locks, setLocks] = useState(LOCKS_INIT);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [tick, setTick] = useState(0);
 
-  const project = useMemo(() => {
-    if (!projectId) return null;
-    return loadProject(projectId);
-  }, [projectId, tick]);
+  // load project
+  useEffect(() => {
+    if (!projectId) return;
+    const p = loadProject(projectId);
+    if (p) {
+      setProject(p);
+      setLocks(p.album?.locks || LOCKS_INIT);
+    }
+  }, [projectId]);
 
   if (!projectId) return <div style={{ padding: 24 }}>Missing projectId</div>;
-  if (!project) return <div style={{ padding: 24 }}>No project loaded</div>;
+  if (!project) return <div style={{ padding: 24 }}>Loading Album…</div>;
 
-  /* ---------- Catalog mirror ---------- */
+  /* ---------- derived ---------- */
 
-  const catalogSongs = Array.isArray(project?.catalog?.songs)
-    ? project.catalog.songs
-    : [];
+  const album = project.album || {};
+  const meta = album.meta || {};
+  const cover = album.cover || {};
+  const catalogSongs = project.catalog?.songs || [];
 
-  /* ---------- Album Meta ---------- */
+  const playlistOrder =
+    Array.isArray(album.playlistOrder) && album.playlistOrder.length
+      ? album.playlistOrder
+      : catalogSongs.map((s) => s.slot);
 
-  const meta = project?.album?.meta || {};
-  const albumTitle = meta.albumTitle || "";
-  const artistName = meta.artistName || "";
-  const releaseDate = meta.releaseDate || "";
+  /* ---------- helpers ---------- */
 
-  function setMetaField(key, value) {
+  function persist(next) {
+    saveProject(projectId, next);
+    setProject(next);
+  }
+
+  function setMetaField(key, val) {
     const next = {
       ...project,
       album: {
-        ...(project.album || {}),
-        meta: {
-          ...(project.album?.meta || {}),
-          [key]: value,
-        },
+        ...album,
+        meta: { ...meta, [key]: val },
       },
       updatedAt: new Date().toISOString(),
     };
-    saveProject(projectId, next);
-    setTick((n) => n + 1);
+    persist(next);
   }
 
-  /* ---------- Cover ---------- */
+  function toggleLock(k) {
+    const nextLocks = { ...locks, [k]: !locks[k] };
+    setLocks(nextLocks);
 
-  const coverUrl = project?.album?.cover?.url || "";
-
-  function setCoverUrl(value) {
     const next = {
       ...project,
       album: {
-        ...(project.album || {}),
-        cover: {
-          ...(project.album?.cover || {}),
-          url: value,
-        },
+        ...album,
+        locks: nextLocks,
       },
-      updatedAt: new Date().toISOString(),
     };
-    saveProject(projectId, next);
-    setTick((n) => n + 1);
+    persist(next);
   }
 
-  /* ---------- Master Save ---------- */
+  /* ---------- cover upload ---------- */
 
-  async function onMasterSave() {
+  async function uploadCover(file) {
+    if (!file) return;
+    if (locks.cover) return;
+
+    setBusy(true);
+    setErr("");
+
+    try {
+      const res = await uploadSongFile({
+        projectId,
+        slot: "cover",
+        versionKey: "album",
+        file,
+      });
+
+      const next = {
+        ...project,
+        album: {
+          ...album,
+          cover: {
+            fileName: file.name,
+            s3Key: res.s3Key,
+          },
+        },
+        updatedAt: new Date().toISOString(),
+      };
+
+      persist(next);
+    } catch (e) {
+      setErr(e.message || "Cover upload failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /* ---------- master save ---------- */
+
+  async function masterSaveAlbum() {
     if (busy) return;
+
+    const ok = window.confirm("Master Save Album?");
+    if (!ok) return;
+
     setBusy(true);
     setErr("");
 
@@ -97,9 +129,6 @@ export default function Album() {
         project,
       });
 
-      const snapshotKey = String(res?.snapshotKey || "");
-      if (!snapshotKey) throw new Error("No snapshotKey returned");
-
       const now = new Date().toISOString();
 
       const next = {
@@ -108,113 +137,153 @@ export default function Album() {
           ...(project.master || {}),
           isMasterSaved: true,
           masterSavedAt: now,
-          lastSnapshotKey: snapshotKey,
+          lastSnapshotKey: res.snapshotKey,
         },
         publish: {
           ...(project.publish || {}),
-          snapshotKey,
+          snapshotKey: res.snapshotKey,
         },
         updatedAt: now,
       };
 
-      saveProject(projectId, next);
-      setTick((n) => n + 1);
-
-      alert("Album Master Save OK");
+      persist(next);
+      window.alert("Album Master Saved");
     } catch (e) {
-      setErr(e?.message || "Master Save failed");
+      setErr(e.message || "Master Save failed");
     } finally {
       setBusy(false);
     }
   }
 
+  /* ---------- render ---------- */
+
   return (
-    <div style={{ maxWidth: 900, padding: 24 }}>
-      <h2>Album</h2>
+    <div style={{ maxWidth: 1100, padding: 18 }}>
+      <h1>Album</h1>
       <div style={{ fontSize: 12, opacity: 0.7 }}>Project {projectId}</div>
 
-      {/* Catalog mirror */}
-      <div style={{ marginTop: 20 }}>
-        <h3>Catalog Songs</h3>
-        {catalogSongs.length === 0 ? (
-          <div style={{ opacity: 0.6 }}>No catalog songs</div>
-        ) : (
-          <ul>
-            {catalogSongs.map((s) => (
-              <li key={s.slot}>
-                #{s.slot} — {s.title || "—"}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      {/* Album Meta */}
-      <div style={{ marginTop: 28, padding: 16, border: "1px solid #e5e7eb", borderRadius: 12 }}>
+      {/* META */}
+      <section style={card()}>
         <h3>Album Meta</h3>
+        <Lock locked={locks.meta} onToggle={() => toggleLock("meta")} />
 
-        <div style={{ marginTop: 12 }}>
-          <div style={{ fontSize: 12, fontWeight: 700 }}>Album Title</div>
-          <input value={albumTitle} onChange={(e) => setMetaField("albumTitle", e.target.value)} style={{ width: "100%", padding: 8 }} />
-        </div>
+        <input
+          placeholder="Album Title"
+          value={meta.albumTitle || ""}
+          disabled={locks.meta}
+          onChange={(e) => setMetaField("albumTitle", e.target.value)}
+          style={input()}
+        />
+        <input
+          placeholder="Artist Name"
+          value={meta.artistName || ""}
+          disabled={locks.meta}
+          onChange={(e) => setMetaField("artistName", e.target.value)}
+          style={input()}
+        />
+        <input
+          type="date"
+          value={meta.releaseDate || ""}
+          disabled={locks.meta}
+          onChange={(e) => setMetaField("releaseDate", e.target.value)}
+          style={input()}
+        />
+      </section>
 
-        <div style={{ marginTop: 12 }}>
-          <div style={{ fontSize: 12, fontWeight: 700 }}>Artist Name</div>
-          <input value={artistName} onChange={(e) => setMetaField("artistName", e.target.value)} style={{ width: "100%", padding: 8 }} />
-        </div>
-
-        <div style={{ marginTop: 12 }}>
-          <div style={{ fontSize: 12, fontWeight: 700 }}>Release Date</div>
-          <input type="date" value={releaseDate} onChange={(e) => setMetaField("releaseDate", e.target.value)} style={{ padding: 8 }} />
-        </div>
-      </div>
-
-      {/* Cover */}
-      <div style={{ marginTop: 28, padding: 16, border: "1px solid #e5e7eb", borderRadius: 12 }}>
+      {/* COVER */}
+      <section style={card()}>
         <h3>Cover</h3>
+        <Lock locked={locks.cover} onToggle={() => toggleLock("cover")} />
 
-        <div style={{ marginTop: 12 }}>
-          <div style={{ fontSize: 12, fontWeight: 700 }}>Cover Image URL</div>
-          <input
-            value={coverUrl}
-            onChange={(e) => setCoverUrl(e.target.value)}
-            placeholder="https://…"
-            style={{ width: "100%", padding: 8 }}
-          />
-        </div>
+        <input
+          type="file"
+          accept="image/*"
+          disabled={locks.cover}
+          onChange={(e) => uploadCover(e.target.files?.[0])}
+        />
 
-        {coverUrl ? (
-          <img
-            src={coverUrl}
-            alt="cover"
-            style={{ marginTop: 12, maxWidth: 240, borderRadius: 8, border: "1px solid #e5e7eb" }}
-          />
+        {cover.s3Key ? (
+          <div style={{ marginTop: 8, fontSize: 12 }}>
+            s3Key: <code>{cover.s3Key}</code>
+          </div>
         ) : null}
-      </div>
+      </section>
 
-      {/* Master Save */}
-      <div style={{ marginTop: 32, paddingTop: 16, borderTop: "1px solid #e5e7eb" }}>
-        <button
-          type="button"
-          onClick={onMasterSave}
-          disabled={busy}
-          style={{ padding: "12px 16px", fontWeight: 900 }}
-        >
-          {busy ? "Saving…" : "Master Save Album"}
+      {/* PLAYLIST */}
+      <section style={card()}>
+        <h3>Playlist Order</h3>
+        <Lock locked={locks.playlist} onToggle={() => toggleLock("playlist")} />
+
+        <ol>
+          {playlistOrder.map((slot) => {
+            const s = catalogSongs.find((x) => x.slot === slot);
+            return <li key={slot}>{s?.title || `Song ${slot}`}</li>;
+          })}
+        </ol>
+      </section>
+
+      {/* MASTER SAVE */}
+      <section style={card()}>
+        <button onClick={masterSaveAlbum} disabled={busy}>
+          Master Save Album
         </button>
 
-        {project?.master?.isMasterSaved ? (
-          <div style={{ marginTop: 10, color: "#065f46", fontWeight: 900 }}>✅ Album Master Saved</div>
+        {project.master?.isMasterSaved ? (
+          <div style={{ marginTop: 8, color: "#065f46", fontWeight: 900 }}>
+            ✅ Album Master Saved
+          </div>
         ) : null}
 
-        {project?.master?.lastSnapshotKey ? (
+        {project.master?.lastSnapshotKey ? (
           <div style={{ marginTop: 6, fontSize: 12 }}>
             Snapshot: <code>{project.master.lastSnapshotKey}</code>
           </div>
         ) : null}
 
-        {err ? <div style={{ marginTop: 10, color: "#991b1b", fontSize: 12 }}>{err}</div> : null}
-      </div>
+        {err ? <div style={{ color: "red" }}>{err}</div> : null}
+      </section>
     </div>
+  );
+}
+
+/* ---------- ui helpers ---------- */
+
+function card() {
+  return {
+    background: "#fff",
+    border: "1px solid #e5e7eb",
+    borderRadius: 12,
+    padding: 14,
+    marginTop: 14,
+  };
+}
+
+function input() {
+  return {
+    display: "block",
+    width: "100%",
+    marginTop: 8,
+    padding: 10,
+    borderRadius: 8,
+    border: "1px solid #d1d5db",
+  };
+}
+
+function Lock({ locked, onToggle }) {
+  return (
+    <button
+      onClick={onToggle}
+      style={{
+        marginBottom: 8,
+        background: locked ? "#fee2e2" : "#e5e7eb",
+        border: "none",
+        padding: "6px 10px",
+        borderRadius: 999,
+        fontWeight: 900,
+        cursor: "pointer",
+      }}
+    >
+      {locked ? "LOCKED" : "UNLOCKED"}
+    </button>
   );
 }
