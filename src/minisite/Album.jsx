@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
 
 import { loadProject, saveProject, fmtTime, once, fetchPlaybackUrl } from "./catalog/catalogCore.js";
+import { masterSaveMiniSite } from "../lib/masterSaveMiniSite.js";
 
 /* BUILD STAMP — used in snapshot (NOT shown in UI) */
 const ALBUM_BUILD_STAMP = "STAMP-ALBUM-LAYOUT-LOCKED-DND-PLAYER-2026-01-11-B";
@@ -663,7 +664,9 @@ export default function Album() {
         updatedAt: new Date().toISOString(),
       };
 
-      persistProject(next);
+      persistProject(next); 
+      await masterSaveMiniSite({ projectId, project: next });
+
 
       window.alert("Album Master Save confirmed.\n\nSnapshot written to album.masterSave.");
     } catch (e) {
