@@ -1,5 +1,5 @@
 // src/pages/ExportTools.jsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 
 function safeParse(json) {
@@ -42,6 +42,14 @@ function saveProjectsIndex(producerId, rows) {
   localStorage.setItem(indexKey(producerId), JSON.stringify(Array.isArray(rows) ? rows : []));
 }
 
+function normalizeSnapshotKey(k) {
+  const s = safeString(k);
+  if (!s) return "";
+  // masterSnapshot_* is NOT a real S3 key; ignore it
+  if (s.startsWith("masterSnapshot_")) return "";
+  return s;
+}
+
 function savePublishResultToLocal({ projectId, producerId, snapshotKey, shareId, publicUrl, manifestKey }) {
   if (!projectId) return;
 
@@ -56,7 +64,7 @@ function savePublishResultToLocal({ projectId, producerId, snapshotKey, shareId,
       lastPublicUrl: String(publicUrl || ""),
       manifestKey: String(manifestKey || ""),
       publishedAt: nowIso,
-      // store REAL S3 snapshotKey returned by backend
+      // IMPORTANT: store the REAL S3 snapshotKey returned by backend (if any)
       snapshotKey: String(snapshotKey || ""),
     };
     proj.updatedAt = nowIso;
@@ -85,30 +93,15 @@ function savePublishResultToLocal({ projectId, producerId, snapshotKey, shareId,
   }
 }
 
-/**
- * Only allow REAL S3 snapshot keys.
- * - Reject masterSnapshot_* labels
- * - Reject anything that isn't producer_returns/snapshots/*.json
- */
-function normalizeSnapshotKey(k) {
-  const s = safeString(k);
-  if (!s) return "";
-  if (s.startsWith("masterSnapshot_")) return "";
-  if (!s.startsWith("storage/projects/")) return "";
-  if (!s.includes("/producer_returns/snapshots/")) return "";
-  if (!s.endsWith(".json")) return "";
-  return s;
-}
-
 export default function ExportTools() {
   const { projectId } = useParams();
 
-  // Single source of truth; match Catalog.jsx
+  // ✅ single source of truth; match Catalog.jsx
   const API_BASE = useMemo(() => {
     return String(import.meta.env.VITE_API_BASE || "").trim().replace(/\/+$/, "");
   }, []);
 
-  // IMPORTANT: keep the input BLANK by default; do not self-populate.
+  // ✅ IMPORTANT: this field must be allowed to stay blank (no auto-repopulate)
   const [snapshotKey, setSnapshotKey] = useState("");
 
   const [loading, setLoading] = useState(false);
@@ -122,11 +115,7 @@ export default function ExportTools() {
   const published = useMemo(() => {
     if (!proj) return null;
     return proj.publish || null;
-  }, [proj, result]);
-
-  // ✅ DO NOT hydrate the snapshotKey input from localStorage.
-  // This was the source of the “phantom self-populating” snapshotKey.
-  // Publishing should default to backend latest.json when the field is blank.
+  }, [proj]);
 
   const doPublish = async () => {
     if (!projectId) return;
@@ -145,7 +134,7 @@ export default function ExportTools() {
     try {
       const snap = normalizeSnapshotKey(snapshotKey);
 
-      // Allow publishing WITHOUT snapshotKey (backend will use latest.json)
+      // ✅ Allow publishing without snapshotKey (backend will use producer_returns/latest.json)
       const body = snap ? { projectId, snapshotKey: snap } : { projectId };
 
       const r = await fetch(`${API_BASE}/api/publish-minisite`, {
@@ -159,7 +148,7 @@ export default function ExportTools() {
 
       setResult(j);
 
-      // Always persist the REAL snapshotKey returned by backend.
+      // ✅ Persist the REAL snapshotKey returned by backend (if present)
       const returnedSnapshotKey = normalizeSnapshotKey(j?.snapshotKey);
 
       savePublishResultToLocal({
@@ -171,9 +160,8 @@ export default function ExportTools() {
         manifestKey: j.manifestKey,
       });
 
-      // Keep UI input blank unless user explicitly wants to pin a snapshot.
-      // (If you prefer showing it, uncomment below.)
-      // if (returnedSnapshotKey) setSnapshotKey(returnedSnapshotKey);
+      // ✅ Do NOT auto-fill the input (keep blank behavior)
+      // If you want to show what was used, rely on the Result panel instead.
     } catch (e) {
       setErr(e?.message || String(e));
     } finally {
@@ -213,8 +201,7 @@ export default function ExportTools() {
         </div>
 
         <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
-          Leave blank to publish from <code>producer_returns/latest.json</code>. Only paste keys that look like{" "}
-          <code>storage/projects/.../producer_returns/snapshots/...json</code>.
+          If blank, the backend publishes from <code>producer_returns/latest.json</code>.
         </div>
 
         {err ? <div style={{ marginTop: 12, ...errorBox() }}>{err}</div> : null}
