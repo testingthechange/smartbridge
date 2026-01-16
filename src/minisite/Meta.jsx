@@ -241,15 +241,20 @@ export default function Meta() {
   return (
     <div style={{ maxWidth: 1200 }}>
       {/* Small header */}
-      <div style={{ fontSize: 11, opacity: 0.75, marginBottom: 12 }}>
-        Project ID: <code>{projectId}</code>
-        {token ? (
-          <>
-            {" "}
-            · Link: <code>{token.slice(0, 10)}…</code>
-          </>
-        ) : null}
-      </div>
+<div style={{ fontSize: 11, opacity: 0.75, marginBottom: 10 }}>
+  Project ID: <code>{projectId}</code>
+  {token ? (
+    <>
+      {" · "}
+      Link: <code>{token.slice(0, 10)}…</code>
+    </>
+  ) : null}
+  {" · "}
+  <strong>Meta Build:</strong> <code>{META_BUILD_STAMP}</code>
+  {" · "}
+  <strong>App Build:</strong>{" "}
+  <code>{import.meta.env.VITE_APP_BUILD_STAMP || "NO_APP_STAMP_ENV"}</code>
+</div>
 
       {/* Title */}
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-end" }}>

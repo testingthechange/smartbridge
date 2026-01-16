@@ -1,9 +1,9 @@
-// src/minisite/catalog/catalogCore.js
+// FILE: src/minisite/catalog/catalogCore.js
 // Core helpers + API calls + snapshot builder for Catalog.
 
-export const DEFAULT_API_BASE =
-  (import.meta?.env?.VITE_BACKEND_URL || "").trim() ||
-  "https://album-backend-c7ed.onrender.com";
+export const DEFAULT_API_BASE = String(import.meta?.env?.VITE_API_BASE || "https://album-backend-c7ed.onrender.com")
+  .trim()
+  .replace(/\/+$/, "");
 
 export const MASTER_SAVE_ENDPOINT = `${DEFAULT_API_BASE}/api/master-save`;
 export const MAX_UPLOAD_MB = 25;
@@ -13,6 +13,8 @@ export const VERSION_KEYS = [
   { key: "a", label: "A Version" },
   { key: "b", label: "B Version" },
 ];
+
+/* ---------------- storage helpers ---------------- */
 
 export function safeParse(json) {
   try {
@@ -34,7 +36,7 @@ export function loadProject(id) {
 
 export function saveProject(id, obj) {
   if (!id) return;
-  localStorage.setItem(projectKey(id), JSON.stringify(obj));
+  localStorage.setItem(projectKey(id), JSON.stringify(obj || {}));
 }
 
 export function emptySong(slot) {
@@ -65,6 +67,8 @@ export function ensureSongTitleJson(slot, title) {
   };
 }
 
+/* ---------------- misc utils ---------------- */
+
 export function clamp(n, lo, hi) {
   return Math.max(lo, Math.min(hi, n));
 }
@@ -86,7 +90,7 @@ export function once(el, eventName) {
   });
 }
 
-/* ---------------- Upload (use /api/upload-to-s3) ---------------- */
+/* ---------------- Upload (STATIC SITE: DISABLED) ---------------- */
 
 function safeFileName(name) {
   const raw = String(name || "file");
@@ -101,56 +105,33 @@ function makeUploadKey({ projectId, slot, versionKey, fileName }) {
 
 /**
  * Uploads a file via backend:
- * POST /api/upload-to-s3 (multipart: file, s3Key)
- * Returns: { ok:true, s3Key, publicUrl }
+ * POST /api/upload-to-s3?projectId=...
+ *
+ * IMPORTANT:
+ * smartbridge2 is a STATIC SITE. It must NOT call /api/upload-to-s3.
+ * Uploading is out-of-scope in this deployment and belongs to the publisher/admin backend.
  */
-export async function uploadSongFile({
-  apiBase = DEFAULT_API_BASE,
-  projectId,
-  slot,
-  versionKey,
-  file,
-}) {
-  const s3Key = makeUploadKey({
-    projectId,
-    slot,
-    versionKey,
-    fileName: file?.name || "audio",
-  });
-
-  const fd = new FormData();
-  fd.append("file", file);
-  fd.append("s3Key", s3Key);
-
-  // ✅ ONE-LINE FIX: always include projectId so backend never has to guess it
-  const res = await fetch(
-    `${apiBase}/api/upload-to-s3?projectId=${encodeURIComponent(String(projectId || ""))}`,
-    {
-      method: "POST",
-      body: fd,
-    }
-  );
-
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json?.error || `Upload failed (${res.status})`);
-
-  return json; // { ok, s3Key, publicUrl }
+export async function uploadSongFile({ apiBase = DEFAULT_API_BASE, projectId, slot, versionKey, file }) {
+  // Hard stop so Catalog cannot accidentally attempt uploads from this static deployment.
+  throw new Error("upload-to-s3 disabled on smartbridge2 (static site). Upload in publisher/admin backend.");
 }
 
 /* ---------------- Playback URL ---------------- */
 
 export async function fetchPlaybackUrl({ apiBase = DEFAULT_API_BASE, s3Key }) {
-  const res = await fetch(
-    `${apiBase}/api/playback-url?s3Key=${encodeURIComponent(String(s3Key || ""))}`
-  );
+  const base = String(apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
+  const key = String(s3Key || "").trim();
+  if (!key) throw new Error("fetchPlaybackUrl: missing s3Key");
+
+  const res = await fetch(`${base}/api/playback-url?s3Key=${encodeURIComponent(key)}`);
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json?.error || `URL failed (${res.status})`);
+  if (!res.ok || json?.ok !== true) throw new Error(json?.error || `URL failed (${res.status})`);
   return json?.url || "";
 }
 
 /* ---------------- Snapshot / Master Save ---------------- */
 
-// ✅ This is the human-facing Catalog lock object (fine to keep)
+// Human-facing locked catalog shape (fine to keep)
 export function buildLockedCatalog(project) {
   const songs = Array.isArray(project?.catalog?.songs) ? project.catalog.songs : [];
   const lockedSongs = songs.map((s) => ({
@@ -175,12 +156,13 @@ export function buildLockedCatalog(project) {
   return { songCount: lockedSongs.length, songs: lockedSongs };
 }
 
-// ✅ THIS is what publish expects: snapshot.project.catalog.songs with slot/title/files.*
+// Normalize to the shape your UI + publish read: project.catalog.songs[] with files.*.playbackUrl
 function normalizeCatalogSongsForProject(project) {
   const songs = Array.isArray(project?.catalog?.songs) ? project.catalog.songs : [];
   return songs.map((s) => {
     const slot = Number(s?.slot);
     const title = String((s?.title || "").trim());
+
     const titleJson =
       s?.titleJson && typeof s.titleJson === "object"
         ? {
@@ -192,6 +174,7 @@ function normalizeCatalogSongsForProject(project) {
         : ensureSongTitleJson(slot, title);
 
     const files = s?.files && typeof s.files === "object" ? s.files : {};
+
     return {
       slot,
       title,
@@ -210,14 +193,13 @@ function normalizeCatalogSongsForProject(project) {
         b: {
           fileName: String(files?.b?.fileName || ""),
           s3Key: String(files?.b?.s3Key || ""),
-          playbackUrl: String(files?.b?.playbackbackUrl || ""),
+          playbackUrl: String(files?.b?.playbackUrl || ""), // ✅ FIXED (was playbackbackUrl)
         },
       },
     };
   });
 }
 
-// ✅ Make sure album.songTitles exists too (optional but useful)
 function deriveAlbumSongTitlesFromCatalogSongs(catalogSongs) {
   return catalogSongs.map((s) => ({
     slot: Number(s.slot),
@@ -226,23 +208,27 @@ function deriveAlbumSongTitlesFromCatalogSongs(catalogSongs) {
   }));
 }
 
+/**
+ * buildSnapshot returns a wrapper snapshot that contains snapshot.project
+ * (use snapshot.project as the canonical project object).
+ */
 export function buildSnapshot({ projectId, project }) {
   const now = new Date().toISOString();
+  const pid = String(projectId || "").trim();
   const catalogSongs = normalizeCatalogSongsForProject(project);
 
   return {
-    projectId,
+    projectId: pid,
     createdAt: project?.createdAt || now,
     updatedAt: now,
 
-    // keep the “locked” object for historical/reporting if you want
     locked: {
       catalog: buildLockedCatalog(project),
     },
 
-    // ✅ publish-minisite reads from snapshot.project.catalog.songs / album
     project: {
       ...(project || {}),
+      projectId: pid,
       catalog: {
         ...(project?.catalog || {}),
         songs: catalogSongs,
@@ -269,11 +255,16 @@ export function buildSnapshot({ projectId, project }) {
   };
 }
 
-// ✅ Backend wants just the project object
+// Backend wants just the full project object
 export function projectForBackendFromSnapshot(snapshot) {
   return snapshot?.project || {};
 }
 
+/**
+ * POST /api/master-save
+ * Body: { projectId, project }
+ * Returns: { ok:true, snapshotKey, latestKey }
+ */
 export async function postMasterSave({
   apiBase = DEFAULT_API_BASE,
   projectId,
@@ -290,5 +281,36 @@ export async function postMasterSave({
 
   const json = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(json?.error || `Master Save failed (${res.status})`);
-  return json; // { ok:true, snapshotKey, version? }
+
+  // json is: { ok:true, snapshotKey, latestKey }
+  const snapshotKey = String(json?.snapshotKey || "");
+  const savedAt = new Date().toISOString();
+
+  // ✅ Persist global master flags into local project immediately
+  // so ALL pages can read it from localStorage consistently.
+  try {
+    const current = loadProject(projectId) || projectForBackend || {};
+    const next = {
+      ...current,
+      master: {
+        ...(current.master || {}),
+        isMasterSaved: true,
+        masterSavedAt: savedAt,
+        lastSnapshotKey: snapshotKey,
+        producerReturnReceived: current?.master?.producerReturnReceived ?? false,
+        producerReturnReceivedAt: current?.master?.producerReturnReceivedAt || "",
+      },
+      // optional convenience mirror
+      publish: {
+        ...(current.publish || {}),
+        snapshotKey: snapshotKey,
+      },
+      updatedAt: savedAt,
+    };
+    saveProject(projectId, next);
+  } catch (e) {
+    console.warn("postMasterSave: failed to persist local master flags", e);
+  }
+
+  return json;
 }

@@ -1,6 +1,7 @@
 // src/ProjectMiniSiteContext.jsx
 import React, { createContext, useContext, useMemo, useState } from "react";
 import { masterSaveMiniSite } from "./lib/masterSaveMiniSite.js";
+import { loadProject, saveProject } from "./minisite/projectLocal.js";
 
 const Ctx = createContext(null);
 
@@ -26,7 +27,8 @@ function makeDefaultSections() {
   };
 }
 
-// ---------- Two-tier validation helpers ----------
+/* ---------------- Two-tier validation helpers ---------------- */
+
 function isTwoTierComplete(q) {
   if (!q) return true;
 
@@ -89,7 +91,8 @@ function hasAnyTwoTier(twoTier) {
   return hasSection || hasSongs || hasMeta;
 }
 
-// ---------- Provider ----------
+/* ---------------- Provider ---------------- */
+
 export function ProjectMiniSiteProvider({ projectId, children }) {
   const [tracks, setTracks] = useState(makeDefaultTracks());
   const [sections, setSections] = useState(makeDefaultSections());
@@ -107,7 +110,7 @@ export function ProjectMiniSiteProvider({ projectId, children }) {
   const [masterSavedAt, setMasterSavedAt] = useState("");
   const isMasterSaved = !!masterSavedAt;
 
-  // Master Save tracking block
+  // Master Save tracking block (mini-site level)
   const [masterSave, setMasterSave] = useState({
     lastMasterSaveAt: "",
     sections: {
@@ -144,24 +147,71 @@ export function ProjectMiniSiteProvider({ projectId, children }) {
     setMasterSaveBusy(true);
 
     try {
+      // 1) Load current local project
+      const current = loadProject(projectId) || { projectId: String(projectId) };
+      const nowIso = new Date().toISOString();
+
+      // 2) Merge mini-site state into the real project object
+      //    IMPORTANT: this is what we want stored in S3 snapshots
+      const nextProject = {
+        ...current,
+        projectId: String(current?.projectId || projectId),
+        updatedAt: nowIso,
+
+        // keep existing top-level pages untouched; we only attach/refresh these surfaces
+        tracks,
+        sections,
+        twoTier,
+
+        // keep the app-level tracking block too (matches what you showed in snapshots)
+        masterSave: current?.masterSave || current?.masterSave || current?.masterSave,
+      };
+
+      // 3) POST full project to backend snapshot route (via your helper)
+      //    We pass both styles:
+      //    - project (for server.js which expects { projectId, project })
+      //    - tracks/sections/twoTier (for older helper versions that still build payload)
       const out = await masterSaveMiniSite({
         projectId,
+        project: nextProject,
         tracks,
         sections,
         twoTier,
       });
 
-      const s3Key = out?.s3Key || out?.snapshotKey || out?.key || "";
-      const masterSaveId = out?.masterSaveId || out?.id || "";
-      const savedAt = out?.savedAt || out?.timestamp || new Date().toISOString();
+      // 4) Normalize response keys from backend
+      const snapshotKey = String(out?.snapshotKey || out?.s3Key || out?.key || "");
+      const latestKey = String(out?.latestKey || "");
+      const savedAt = String(out?.savedAt || out?.timestamp || new Date().toISOString());
+      const masterSaveId = String(out?.masterSaveId || out?.id || "");
 
-      setLastMasterSaveKey(s3Key);
+      // 5) Persist keys back into local project (so reloads can find latest snapshotKey)
+      const finalProject = {
+        ...nextProject,
+        updatedAt: savedAt,
+        master: {
+          ...(nextProject?.master || {}),
+          isMasterSaved: true,
+          masterSavedAt: savedAt,
+          lastSnapshotKey: snapshotKey,
+        },
+        // keep a publish surface if it exists; don't overwrite it
+        publish: {
+          ...(nextProject?.publish || {}),
+          snapshotKey: nextProject?.publish?.snapshotKey || snapshotKey || "",
+        },
+      };
+
+      saveProject(projectId, finalProject);
+
+      // 6) Update UI state
+      setLastMasterSaveKey(snapshotKey || latestKey);
       setLastMasterSaveId(masterSaveId);
 
       // Freeze the mini-site
       setMasterSavedAt(savedAt);
 
-      // Update masterSave tracking structure
+      // Update masterSave tracking structure (mini-site UI tracking)
       setMasterSave({
         lastMasterSaveAt: savedAt,
         sections: {
@@ -172,6 +222,9 @@ export function ProjectMiniSiteProvider({ projectId, children }) {
           meta: { complete: true, masterSavedAt: savedAt },
         },
       });
+
+      // Final confirmation message (explicit)
+      window.alert("Master Save confirmed.\n\nSnapshot written.");
 
       return out;
     } catch (e) {

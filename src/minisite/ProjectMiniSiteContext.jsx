@@ -41,6 +41,7 @@ function deepMerge(base, patch) {
 }
 
 function loadProjectLocal(projectId) {
+  if (!projectId) return null;
   const raw = localStorage.getItem(projectKey(projectId));
   const parsed = raw ? safeParse(raw) : null;
   return parsed && typeof parsed === "object" ? parsed : null;
@@ -48,6 +49,8 @@ function loadProjectLocal(projectId) {
 
 // IMPORTANT: never write a fresh seed unless nothing exists.
 function ensureProject(projectId, seed) {
+  if (!projectId) return null;
+
   const existing = loadProjectLocal(projectId);
   if (existing) return existing;
 
@@ -56,12 +59,16 @@ function ensureProject(projectId, seed) {
     projectId: String(projectId),
     createdAt: now,
     updatedAt: now,
-    catalog: { songs: [], masterSave: {} },
+
+    catalog: { songs: [] },
     album: { meta: {}, songTitles: [], playlistOrder: [] },
-    nftMix: { glueLines: [], masterSave: {} },
+    nftMix: { glueLines: [] },
     songs: {},
     meta: { songs: [] },
+
     magic: { token: "", active: false, expiresAt: "", sentAt: "" },
+
+    // Canonical "master pointer" block (what you want to keep in sync)
     master: {
       isMasterSaved: false,
       masterSavedAt: "",
@@ -69,7 +76,16 @@ function ensureProject(projectId, seed) {
       producerReturnReceived: false,
       producerReturnReceivedAt: "",
     },
-    publish: { lastShareId: "", lastPublicUrl: "", publishedAt: "", manifestKey: "", snapshotKey: "" },
+
+    publish: {
+      lastShareId: "",
+      lastPublicUrl: "",
+      publishedAt: "",
+      manifestKey: "",
+      snapshotKey: "",
+    },
+
+    // Canonical "sections completion" block
     masterSave: { lastMasterSaveAt: "", sections: {} },
   };
 
@@ -80,6 +96,56 @@ function ensureProject(projectId, seed) {
 
 function writeProjectLocal(projectId, obj) {
   localStorage.setItem(projectKey(projectId), JSON.stringify(obj || {}));
+}
+
+function normalizeSnapshotKeyFromResponse(out) {
+  // Backend returns { snapshotKey, latestKey }
+  // Some older callers might return { s3Key } or { key }
+  return (
+    String(out?.snapshotKey || "").trim() ||
+    String(out?.s3Key || "").trim() ||
+    String(out?.key || "").trim() ||
+    ""
+  );
+}
+
+function isTruthySnapshotKey(s) {
+  const v = String(s || "").trim();
+  return v.startsWith("storage/projects/") && v.includes("/master_save_snapshots/") && v.endsWith(".json");
+}
+
+/**
+ * Canonical "after master save" patch:
+ * - project.master.{isMasterSaved, masterSavedAt, lastSnapshotKey} MUST match latest snapshot
+ * - project.masterSave.lastMasterSaveAt updated
+ * - project.masterSave.sections updated (keeps any existing section states)
+ */
+function buildMasterSavePatch({ savedAt, snapshotKey }) {
+  const at = String(savedAt || nowIso());
+
+  const masterPatch = {
+    isMasterSaved: true,
+    masterSavedAt: at,
+    ...(snapshotKey ? { lastSnapshotKey: snapshotKey } : {}),
+  };
+
+  const sectionsPatch = {
+    // Merge-friendly: only touches the keys we include
+    catalog: { complete: true, masterSavedAt: at },
+    album: { complete: true, masterSavedAt: at },
+    songs: { complete: true, masterSavedAt: at },
+    meta: { complete: true, masterSavedAt: at },
+    // keep nftMix optional by default
+    nftMix: { complete: false, masterSavedAt: "" },
+  };
+
+  return {
+    master: masterPatch,
+    masterSave: {
+      lastMasterSaveAt: at,
+      sections: sectionsPatch,
+    },
+  };
 }
 
 export function ProjectMiniSiteProvider({ children }) {
@@ -105,28 +171,35 @@ export function ProjectMiniSiteProvider({ children }) {
   }, [activeProjectId]);
 
   // ✅ The only safe write: deep-merge into existing project and persist
-  const mergeProject = useCallback((projectId, patch) => {
-    if (!projectId) return null;
-    const existing = ensureProject(projectId);
-    const now = nowIso();
+  const mergeProject = useCallback(
+    (projectId, patch) => {
+      if (!projectId) return null;
+      const existing = ensureProject(projectId);
+      if (!existing) return null;
 
-    const merged = deepMerge(existing, patch || {});
-    merged.projectId = String(projectId);
-    merged.updatedAt = now;
+      const now = nowIso();
+      const merged = deepMerge(existing, patch || {});
+      merged.projectId = String(projectId);
+      merged.updatedAt = now;
 
-    writeProjectLocal(projectId, merged);
+      writeProjectLocal(projectId, merged);
 
-    if (String(projectId) === String(activeProjectId)) {
-      setProject(merged);
-    }
-    return merged;
-  }, [activeProjectId]);
+      if (String(projectId) === String(activeProjectId)) {
+        setProject(merged);
+      }
+      return merged;
+    },
+    [activeProjectId]
+  );
 
   // ✅ Per-section helper: merges only that section
-  const setSection = useCallback((projectId, sectionName, sectionPatch) => {
-    if (!sectionName) return null;
-    return mergeProject(projectId, { [sectionName]: sectionPatch });
-  }, [mergeProject]);
+  const setSection = useCallback(
+    (projectId, sectionName, sectionPatch) => {
+      if (!projectId || !sectionName) return null;
+      return mergeProject(projectId, { [sectionName]: sectionPatch });
+    },
+    [mergeProject]
+  );
 
   // ✅ Read helper
   const getProject = useCallback((projectId) => {
@@ -134,14 +207,48 @@ export function ProjectMiniSiteProvider({ children }) {
     return loadProjectLocal(projectId);
   }, []);
 
-  const api = useMemo(() => ({
-    activeProjectId,
-    setActiveProjectId,
-    project,
-    mergeProject,
-    setSection,
-    getProject,
-  }), [activeProjectId, project, mergeProject, setSection, getProject]);
+  /**
+   * ✅ Call this immediately after your backend master-save returns.
+   * Example:
+   *   const out = await postMasterSave(...)
+   *   applyMasterSaveResult(projectId, out)
+   */
+  const applyMasterSaveResult = useCallback(
+    (projectId, out, opts = {}) => {
+      if (!projectId) return null;
+
+      const savedAt = String(out?.savedAt || out?.timestamp || opts?.savedAt || nowIso());
+      const snapshotKey = normalizeSnapshotKeyFromResponse(out);
+
+      // Only trust snapshotKey if it looks like the real S3 key for snapshot JSON
+      const finalSnapshotKey = isTruthySnapshotKey(snapshotKey) ? snapshotKey : "";
+
+      const patch = buildMasterSavePatch({
+        savedAt,
+        snapshotKey: finalSnapshotKey,
+      });
+
+      return mergeProject(projectId, patch);
+    },
+    [mergeProject]
+  );
+
+  const api = useMemo(
+    () => ({
+      activeProjectId,
+      setActiveProjectId,
+      project,
+
+      // storage
+      mergeProject,
+      setSection,
+      getProject,
+
+      // master save
+      applyMasterSaveResult,
+    }),
+    [activeProjectId, project, mergeProject, setSection, getProject, applyMasterSaveResult]
+  );
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }

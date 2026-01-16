@@ -39,6 +39,29 @@ function isExpiredPresignError(err) {
   );
 }
 
+/** ✅ NEW: compute audio duration from the local file (no network) */
+async function getAudioDurationSecFromFile(file) {
+  if (!file) return 0;
+  const url = URL.createObjectURL(file);
+  try {
+    const a = document.createElement("audio");
+    a.preload = "metadata";
+    a.src = url;
+
+    await new Promise((resolve, reject) => {
+      const onLoaded = () => resolve();
+      const onErr = () => reject(new Error("Failed to read audio duration"));
+      a.addEventListener("loadedmetadata", onLoaded, { once: true });
+      a.addEventListener("error", onErr, { once: true });
+    });
+
+    const d = Number(a.duration);
+    return Number.isFinite(d) && d > 0 ? Math.round(d) : 0;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 function PlayingEq({ active }) {
   return (
     <span
@@ -361,10 +384,20 @@ export default function Catalog() {
       const newS3Key = uploadResult?.s3Key || "";
       if (!newS3Key) throw new Error("Upload did not return s3Key");
 
+      // ✅ NEW: compute duration and persist it
+      let durationSec = 0;
+      try {
+        durationSec = await getAudioDurationSecFromFile(file);
+      } catch {
+        durationSec = 0;
+      }
+
       updateSong(slot, (s) => {
         const prevFiles = s?.files || {};
         const prevVer = prevFiles?.[versionKey] || {};
         return {
+          // ✅ store at song-level too
+          durationSec: durationSec || s?.durationSec || 0,
           files: {
             ...prevFiles,
             [versionKey]: {
@@ -372,6 +405,8 @@ export default function Catalog() {
               fileName: file.name,
               s3Key: newS3Key,
               playbackUrl: "",
+              // ✅ store at version level (masterSave reads this for albumTracks)
+              durationSec: durationSec || 0,
             },
           },
         };
@@ -439,9 +474,31 @@ export default function Catalog() {
         };
       });
 
+      // ✅ songTitles for legacy/simple consumers
       const albumSongTitles = normalizedSongs
         .filter((s) => Number(s.slot) > 0)
         .map((s) => ({ slot: Number(s.slot), title: String(s.title || "") }));
+
+      // ✅ IMPORTANT: album.tracks is what publish should use.
+      // Only include tracks that actually have an uploaded Album-version file.
+      const albumTracks = normalizedSongs
+        .map((s) => {
+          const slot = Number(s.slot);
+          const title = String(s.title || "").trim();
+          const fAlbum = s?.files?.album || s?.files?.Album || s?.files?.ALBUM; // defensive
+          const s3Key = String(fAlbum?.s3Key || "").trim();
+          const durationSec = Number(fAlbum?.durationSec || s?.durationSec || 0) || 0; // ✅ NEW: fallback
+
+          if (!slot || !s3Key) return null;
+
+          return {
+            slot,
+            title: title || `Track ${slot}`,
+            s3Key,
+            durationSec,
+          };
+        })
+        .filter(Boolean);
 
       const projectForSnapshot = {
         ...(project || {}),
@@ -449,6 +506,8 @@ export default function Catalog() {
         album: {
           ...(project?.album || {}),
           songTitles: albumSongTitles,
+          // ✅ NEW: publish consumes this
+          tracks: albumTracks,
         },
         masterSave: {
           ...(project?.masterSave || {}),
