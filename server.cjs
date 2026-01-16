@@ -1,19 +1,22 @@
-// album-backend/server.js (ESM)
-import express from "express";
-import cors from "cors";
-import multer from "multer";
-import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-
-const app = express();
-app.set("trust proxy", 1);
-
+// server.cjs
+const express = require("express");
+const cors = require("cors");
+const path = require("path");
+const { Pool } = require("pg");
+const multer = require("multer");
 const upload = multer({ storage: multer.memoryStorage() });
 
+// storage helpers
+const { saveFileToR2, putJson, getJson } = require("./storage.cjs");
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+// ---------- CORS ----------
 const ALLOWED_ORIGINS = [
-  "https://betablocker.onrender.com",
-  "https://smartbridge2.onrender.com",
+  "https://blackout-web.onrender.com",
   "http://localhost:5173",
+  "http://localhost:4173",
 ];
 
 app.use(
@@ -23,215 +26,239 @@ app.use(
       if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
       return cb(new Error(`CORS blocked origin: ${origin}`), false);
     },
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   })
 );
-app.options("*", cors());
-app.use(express.json({ limit: "10mb" }));
 
-// -------------------------
-// S3 CONFIG (Render env vars)
-// -------------------------
-const S3_BUCKET = String(process.env.S3_BUCKET || "").trim();
-const S3_REGION = String(process.env.S3_REGION || "").trim() || "us-east-1";
+app.use(express.json());
 
-// If you’re using standard AWS creds, Render env vars should be:
-// AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (and optional AWS_SESSION_TOKEN)
-const s3 = new S3Client({ region: S3_REGION });
-
-function requireS3(res) {
-  if (!S3_BUCKET) {
-    res.status(500).json({ ok: false, error: "S3_BUCKET_NOT_SET" });
-    return false;
-  }
-  return true;
-}
-
-function isoStamp() {
-  return new Date().toISOString().replace(/[:.]/g, "-");
-}
-
-// ---- health ----
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, service: "album-backend" });
+// ---------- DATABASE ----------
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
 });
 
-// ---- upload-to-s3 (REAL) ----
-// multipart form-data: file, s3Key
-// returns: { ok:true, s3Key }
-app.post("/api/upload-to-s3", upload.single("file"), async (req, res) => {
+// ---------- ROOT ----------
+app.get("/", (_req, res) => {
+  res.status(200).send("album-backend OK");
+});
+
+// ---------- PROBE ----------
+app.get("/api/__routes_probe", (_req, res) => {
+  res.json({ ok: true, service: "album-backend", ts: new Date().toISOString() });
+});
+
+// ---------- HEALTH ----------
+app.get("/api/health", async (_req, res) => {
   try {
-    if (!requireS3(res)) return;
-
-    const s3Key = String(req.body?.s3Key || "").trim();
-    if (!s3Key) return res.status(400).json({ ok: false, error: "MISSING_S3KEY" });
-    if (!req.file) return res.status(400).json({ ok: false, error: "NO_FILE" });
-
-    const contentType = req.file.mimetype || "application/octet-stream";
-
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: S3_BUCKET,
-        Key: s3Key,
-        Body: req.file.buffer,
-        ContentType: contentType,
-      })
-    );
-
-    return res.json({ ok: true, s3Key });
+    await pool.query("SELECT 1");
+    res.json({ ok: true });
   } catch (err) {
-    console.error("upload-to-s3 error", err);
-    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    console.error(err);
+    res.status(500).json({ ok: false });
   }
 });
 
-// ---- playback-url (REAL signing) ----
-// GET /api/playback-url?s3Key=...
-// returns: { ok:true, url }
-app.get("/api/playback-url", async (req, res) => {
+// ---------- upload-to-s3 (compat stub) ----------
+app.post("/api/upload-to-s3", async (req, res) => {
   try {
-    if (!requireS3(res)) return;
-
-    const s3Key = String(req.query?.s3Key || "").trim();
-    if (!s3Key) return res.status(400).json({ ok: false, error: "MISSING_S3KEY" });
-
-    // If already a URL, echo (supports your existing demo/previewUrl paths)
-    if (/^https?:\/\//i.test(s3Key)) {
-      return res.json({ ok: true, url: s3Key });
+    const projectId = String(req.query.projectId || "").trim();
+    if (!projectId) {
+      return res.status(400).json({ ok: false, error: "MISSING_PROJECT_ID" });
     }
 
-    // Optional: fail fast if object missing (clearer errors)
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const s3Key = `projects/${projectId}/uploads/${ts}`;
+
+    return res.json({ ok: true, projectId, s3Key });
+  } catch (err) {
+    console.error("upload-to-s3 error:", err);
+    return res.status(500).json({ ok: false, error: "UPLOAD_TO_S3_FAILED" });
+  }
+});
+
+// ---------- META ----------
+app.post("/api/projects/:projectId/meta", async (req, res) => {
+  const { projectId } = req.params;
+  const meta = req.body;
+
+  if (!meta || typeof meta !== "object") {
+    return res.status(400).json({ ok: false, error: "NO_META_PAYLOAD" });
+  }
+
+  try {
+    await pool.query(
+      `
+      INSERT INTO project_meta (project_id, meta_json)
+      VALUES ($1, $2)
+      ON CONFLICT (project_id)
+      DO UPDATE SET
+        meta_json = EXCLUDED.meta_json,
+        updated_at = now()
+      `,
+      [projectId, meta]
+    );
+
+    res.json({ ok: true, projectId });
+  } catch (err) {
+    console.error("Error saving meta", err);
+    res.status(500).json({ ok: false, error: "META_SAVE_FAILED" });
+  }
+});
+
+app.get("/api/projects/:projectId/meta", async (req, res) => {
+  const { projectId } = req.params;
+
+  try {
+    const result = await pool.query(
+      `SELECT meta_json FROM project_meta WHERE project_id = $1`,
+      [projectId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, meta: null });
+    }
+
+    res.json({ ok: true, meta: result.rows[0].meta_json });
+  } catch (err) {
+    console.error("Error loading meta", err);
+    res.status(500).json({ ok: false, error: "META_LOAD_FAILED" });
+  }
+});
+
+// ---------- MP3 UPLOAD ----------
+app.post(
+  "/api/projects/:projectId/songs/:songId/upload",
+  upload.single("file"),
+  async (req, res) => {
+    const { projectId, songId } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json({ ok: false, error: "NO_FILE" });
+    }
+
+    const key = `projects/${projectId}/songs/${songId}/${req.file.originalname}`;
+
     try {
-      await s3.send(new HeadObjectCommand({ Bucket: S3_BUCKET, Key: s3Key }));
-    } catch {
-      return res.status(404).json({ ok: false, error: "S3_OBJECT_NOT_FOUND", s3Key });
+      const url = await saveFileToR2({
+        key,
+        contentType: req.file.mimetype,
+        body: req.file.buffer,
+      });
+
+      res.json({ ok: true, url });
+    } catch (err) {
+      console.error("R2 upload failed", err);
+      res.status(500).json({ ok: false, error: "UPLOAD_FAILED" });
     }
-
-    const url = await getSignedUrl(
-      s3,
-      new GetObjectCommand({ Bucket: S3_BUCKET, Key: s3Key }),
-      { expiresIn: 60 * 15 } // 15 minutes
-    );
-
-    return res.json({ ok: true, url });
-  } catch (err) {
-    console.error("playback-url error", err);
-    return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
-});
+);
 
-// ---- master-save (REAL to S3 JSON) ----
-// POST /api/master-save { projectId, project }
-// returns { ok:true, snapshotKey, latestKey }
+// ---------- MASTER SAVE ----------
 app.post("/api/master-save", async (req, res) => {
   try {
-    if (!requireS3(res)) return;
-
     const { projectId, project } = req.body || {};
-    const pid = String(projectId || "").trim();
-    if (!pid || !project) {
-      return res.status(400).json({ ok: false, error: "Missing projectId or project" });
+    if (!projectId || !project) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing projectId or project",
+      });
     }
 
     const now = new Date().toISOString();
-    const ts = isoStamp();
+    const ts = now.replace(/[:.]/g, "-");
 
-    const snapshotKey = `storage/projects/${pid}/producer_returns/snapshots/${ts}.json`;
-    const latestKey = `storage/projects/${pid}/producer_returns/latest.json`;
+    const snapshotKey = `storage/projects/${projectId}/producer_returns/snapshots/${ts}.json`;
+    const latestKey = `storage/projects/${projectId}/producer_returns/latest.json`;
 
-    const snapshotPayload = {
-      projectId: pid,
+    await putJson(snapshotKey, {
+      projectId,
       createdAt: now,
       source: "minisite-master-save",
       data: project,
-    };
+    });
 
-    const latestPayload = {
-      projectId: pid,
+    await putJson(latestKey, {
+      projectId,
       latestSnapshotKey: snapshotKey,
       lastMasterSaveAt: now,
-    };
+    });
 
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: S3_BUCKET,
-        Key: snapshotKey,
-        Body: Buffer.from(JSON.stringify(snapshotPayload, null, 2)),
-        ContentType: "application/json",
-      })
-    );
-
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: S3_BUCKET,
-        Key: latestKey,
-        Body: Buffer.from(JSON.stringify(latestPayload, null, 2)),
-        ContentType: "application/json",
-      })
-    );
-
-    return res.json({ ok: true, snapshotKey, latestKey });
+    res.json({ ok: true, snapshotKey, latestKey });
   } catch (err) {
-    console.error("master-save error", err);
-    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    console.error("master-save error:", err);
+    res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
 
-// ---- master-save latest (REAL) ----
+// ---------- MASTER SAVE LATEST ----------
 app.get("/api/master-save/latest/:projectId", async (req, res) => {
   try {
-    if (!requireS3(res)) return;
+    const { projectId } = req.params;
+    const latestKey = `storage/projects/${projectId}/producer_returns/latest.json`;
 
-    const pid = String(req.params.projectId || "").trim();
-    if (!pid) return res.status(400).json({ ok: false, error: "MISSING_PROJECT_ID" });
-
-    const latestKey = `storage/projects/${pid}/producer_returns/latest.json`;
-
-    const latestUrl = await getSignedUrl(
-      s3,
-      new GetObjectCommand({ Bucket: S3_BUCKET, Key: latestKey }),
-      { expiresIn: 60 } // short
-    );
-
-    // fetch latest JSON via signed URL (simpler than streaming in Node)
-    const latestRes = await fetch(latestUrl, { cache: "no-store" });
-    if (!latestRes.ok) {
-      return res.status(404).json({ ok: false, error: "NO_LATEST", latestKey });
-    }
-    const latest = await latestRes.json();
-
+    const latest = await getJson(latestKey);
     const snapKey =
       String(latest?.latestSnapshotKey || "").trim() ||
       String(latest?.snapshotKey || "").trim();
 
     if (!snapKey) {
-      return res.status(404).json({ ok: false, error: "NO_LATEST_SNAPSHOT_KEY", latestKey });
+      return res.status(404).json({
+        ok: false,
+        error: "NO_LATEST_SNAPSHOT_KEY",
+        latestKey,
+      });
     }
 
-    const snapUrl = await getSignedUrl(
-      s3,
-      new GetObjectCommand({ Bucket: S3_BUCKET, Key: snapKey }),
-      { expiresIn: 60 }
-    );
+    const snapshot = await getJson(snapKey);
 
-    const snapRes = await fetch(snapUrl, { cache: "no-store" });
-    if (!snapRes.ok) {
-      return res.status(404).json({ ok: false, error: "SNAPSHOT_NOT_FOUND", snapKey });
-    }
-    const snapshot = await snapRes.json();
-
-    return res.json({ ok: true, latestKey, latest, snapshot });
+    res.json({ ok: true, latestKey, latest, snapshot });
   } catch (err) {
-    console.error("master-save latest error", err);
-    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    console.error("master-save latest error:", err);
+    res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
 
-// Root
-app.get("/", (_req, res) => {
-  res.type("text").send("album-backend OK. Try /api/health");
+// ---------- PUBLISH (stub) ----------
+app.post("/api/publish-minisite", (req, res) => {
+  const { projectId, snapshotKey } = req.body || {};
+  if (!projectId || !snapshotKey) {
+    return res.status(400).json({
+      ok: false,
+      error: "projectId and snapshotKey are required",
+    });
+  }
+
+  return res.json({
+    ok: true,
+    projectId,
+    snapshotKey,
+    note: "publish-minisite reached",
+  });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`album-backend listening on ${PORT}`));
+// ---------- STATIC FRONTEND ----------
+const distDir = path.join(__dirname, "dist");
+app.use(
+  express.static(distDir, {
+    etag: true,
+    maxAge: "1y",
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith("index.html")) {
+        res.setHeader("Cache-Control", "no-store");
+      }
+    },
+  })
+);
+
+// SPA fallback
+app.get("*", (req, res) => {
+  if (req.path.startsWith("/api/")) {
+    return res.status(404).json({ ok: false, error: "NO_ROUTE" });
+  }
+  return res.sendFile(path.join(distDir, "index.html"));
+});
+
+// ---------- START ----------
+app.listen(port, () => {
+  console.log(`album-backend listening on port ${port}`);
+});
