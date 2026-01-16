@@ -10,6 +10,10 @@ function safeParse(json) {
   }
 }
 
+function safeString(v) {
+  return String(v ?? "").trim();
+}
+
 function projectKey(projectId) {
   return `project_${projectId}`;
 }
@@ -52,6 +56,7 @@ function savePublishResultToLocal({ projectId, producerId, snapshotKey, shareId,
       lastPublicUrl: String(publicUrl || ""),
       manifestKey: String(manifestKey || ""),
       publishedAt: nowIso,
+      // store REAL S3 snapshotKey returned by backend
       snapshotKey: String(snapshotKey || ""),
     };
     proj.updatedAt = nowIso;
@@ -80,78 +85,73 @@ function savePublishResultToLocal({ projectId, producerId, snapshotKey, shareId,
   }
 }
 
+/**
+ * Only allow REAL S3 snapshot keys.
+ * - Reject masterSnapshot_* labels
+ * - Reject anything that isn't producer_returns/snapshots/*.json
+ */
+function normalizeSnapshotKey(k) {
+  const s = safeString(k);
+  if (!s) return "";
+  if (s.startsWith("masterSnapshot_")) return "";
+  if (!s.startsWith("storage/projects/")) return "";
+  if (!s.includes("/producer_returns/snapshots/")) return "";
+  if (!s.endsWith(".json")) return "";
+  return s;
+}
+
 export default function ExportTools() {
   const { projectId } = useParams();
 
-  const API_BASE = String(import.meta.env.VITE_BACKEND_URL || "").replace(/\/+$/, "");
+  // Single source of truth; match Catalog.jsx
+  const API_BASE = useMemo(() => {
+    return String(import.meta.env.VITE_API_BASE || "").trim().replace(/\/+$/, "");
+  }, []);
 
+  // IMPORTANT: keep the input BLANK by default; do not self-populate.
   const [snapshotKey, setSnapshotKey] = useState("");
+
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [err, setErr] = useState("");
 
   // Load local publish + producerId (so we can mirror into the right projects index)
-  const proj = useMemo(() => (projectId ? loadProjectLocal(projectId) : null), [projectId]);
-  const producerId = String(proj?.producerId || "").trim();
+  const proj = useMemo(() => (projectId ? loadProjectLocal(projectId) : null), [projectId, result]);
+  const producerId = safeString(proj?.producerId);
 
   const published = useMemo(() => {
     if (!proj) return null;
     return proj.publish || null;
   }, [proj, result]);
 
-  // 1) Hydrate snapshotKey from local project.publish.snapshotKey if present
-  useEffect(() => {
-    if (!projectId) return;
-    const k = String(proj?.publish?.snapshotKey || "").trim();
-    if (k) setSnapshotKey(k);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
-
-  // 2) If snapshotKey still blank, fetch it from backend latest master-save
-  useEffect(() => {
-    if (!projectId) return;
-    if (!API_BASE) return;
-    if (snapshotKey.trim()) return;
-
-    let cancelled = false;
-
-    async function run() {
-      try {
-        const r = await fetch(`${API_BASE}/api/master-save/latest/${encodeURIComponent(projectId)}`);
-        const j = await r.json().catch(() => ({}));
-        if (!r.ok || !j?.ok) return;
-
-        const k =
-          String(j?.latest?.latestSnapshotKey || "").trim() ||
-          String(j?.latestSnapshotKey || "").trim();
-
-        if (!cancelled && k) setSnapshotKey(k);
-      } catch {
-        // ignore
-      }
-    }
-
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [API_BASE, projectId, snapshotKey]);
+  // ✅ DO NOT hydrate the snapshotKey input from localStorage.
+  // This was the source of the “phantom self-populating” snapshotKey.
+  // Publishing should default to backend latest.json when the field is blank.
 
   const doPublish = async () => {
     if (!projectId) return;
-    if (!API_BASE) return window.alert("Missing VITE_BACKEND_URL in .env.local");
-    if (!snapshotKey.trim()) return window.alert("Snapshot Key required.");
+
+    if (!API_BASE) {
+      return window.alert(
+        "Missing VITE_API_BASE. Set it on the Render Static Site and redeploy.\n" +
+          "Example: VITE_API_BASE=https://album-backend-kmuo.onrender.com"
+      );
+    }
 
     setLoading(true);
     setErr("");
     setResult(null);
 
     try {
-      // ✅ FIX: backend route is /api/publish-minisite (NOT /api/publish)
+      const snap = normalizeSnapshotKey(snapshotKey);
+
+      // Allow publishing WITHOUT snapshotKey (backend will use latest.json)
+      const body = snap ? { projectId, snapshotKey: snap } : { projectId };
+
       const r = await fetch(`${API_BASE}/api/publish-minisite`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId, snapshotKey: snapshotKey.trim() }),
+        body: JSON.stringify(body),
       });
 
       const j = await r.json().catch(() => ({}));
@@ -159,15 +159,21 @@ export default function ExportTools() {
 
       setResult(j);
 
-      // ✅ persist publish output so it never “vanishes”
+      // Always persist the REAL snapshotKey returned by backend.
+      const returnedSnapshotKey = normalizeSnapshotKey(j?.snapshotKey);
+
       savePublishResultToLocal({
         projectId,
         producerId,
-        snapshotKey: snapshotKey.trim(),
+        snapshotKey: returnedSnapshotKey,
         shareId: j.shareId,
         publicUrl: j.publicUrl,
         manifestKey: j.manifestKey,
       });
+
+      // Keep UI input blank unless user explicitly wants to pin a snapshot.
+      // (If you prefer showing it, uncomment below.)
+      // if (returnedSnapshotKey) setSnapshotKey(returnedSnapshotKey);
     } catch (e) {
       setErr(e?.message || String(e));
     } finally {
@@ -182,18 +188,22 @@ export default function ExportTools() {
         Project ID: <code>{projectId}</code>
       </div>
 
+      <div style={{ marginTop: 10, fontSize: 11, opacity: 0.6 }}>
+        Backend: <span style={{ fontFamily: "monospace" }}>{API_BASE || "—"}</span>
+      </div>
+
       <div style={{ marginTop: 14, ...card() }}>
         <div style={{ fontSize: 18, fontWeight: 900, color: "#0f172a" }}>Publisher (S3)</div>
 
         <div style={{ marginTop: 12, fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>
-          Snapshot Key
+          Snapshot Key (optional)
         </div>
 
         <div style={{ marginTop: 8, display: "flex", gap: 12, alignItems: "center" }}>
           <input
             value={snapshotKey}
             onChange={(e) => setSnapshotKey(e.target.value)}
-            placeholder="storage/projects/123456/producer_returns/snapshots/2025-12-21T....json"
+            placeholder="(leave blank to publish latest master-save)"
             style={input()}
           />
 
@@ -203,7 +213,8 @@ export default function ExportTools() {
         </div>
 
         <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
-          If this field is blank, do a Master Save first (Catalog or Album), then come back here.
+          Leave blank to publish from <code>producer_returns/latest.json</code>. Only paste keys that look like{" "}
+          <code>storage/projects/.../producer_returns/snapshots/...json</code>.
         </div>
 
         {err ? <div style={{ marginTop: 12, ...errorBox() }}>{err}</div> : null}
@@ -220,7 +231,9 @@ export default function ExportTools() {
         </div>
 
         <div style={{ marginTop: 18, fontSize: 18, fontWeight: 900, color: "#0f172a" }}>Result</div>
-        <pre style={pre()}>{result ? JSON.stringify(result, null, 2) : published ? JSON.stringify(published, null, 2) : "{\n  \n}"}</pre>
+        <pre style={pre()}>
+          {result ? JSON.stringify(result, null, 2) : published ? JSON.stringify(published, null, 2) : "{\n  \n}"}
+        </pre>
       </div>
     </div>
   );
@@ -241,6 +254,7 @@ function input() {
     fontSize: 15,
     outline: "none",
     background: "#fff",
+    fontFamily: "monospace",
   };
 }
 
@@ -278,5 +292,6 @@ function errorBox() {
     border: "1px solid #fecaca",
     padding: 10,
     borderRadius: 12,
+    whiteSpace: "pre-wrap",
   };
 }
