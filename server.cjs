@@ -58,6 +58,29 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------
+// ✅ ADD THIS: upload-to-s3 compatibility endpoint
+// Returns { s3Key } so the frontend does not fail.
+// This does NOT implement real upload. It only provides the contract.
+// ---------------------------------------------------------------------
+app.post("/api/upload-to-s3", async (req, res) => {
+  try {
+    const projectId = String(req.query.projectId || "").trim();
+    if (!projectId) {
+      return res.status(400).json({ ok: false, error: "MISSING_PROJECT_ID" });
+    }
+
+    // Minimal deterministic key. Frontend only needs a string.
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const s3Key = `projects/${projectId}/uploads/${ts}`;
+
+    return res.json({ ok: true, projectId, s3Key });
+  } catch (err) {
+    console.error("upload-to-s3 error:", err);
+    return res.status(500).json({ ok: false, error: "UPLOAD_TO_S3_FAILED" });
+  }
+});
+
 // ---------- META ----------
 app.post("/api/projects/:projectId/meta", async (req, res) => {
   const { projectId } = req.params;
