@@ -222,6 +222,7 @@ export default function Product() {
     <div className="max-w-[1200px] mx-auto px-4 py-6 pb-28">
       {/* IMPORTANT: DO NOT render any header/nav here. That lives in the global layout. */}
 
+      <div className="text-xs opacity-60 mb-2">BUILD: RECEIVER-2026-01-19-A</div>
       <h1 className="text-4xl font-bold mb-6">{albumTitle}</h1>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
