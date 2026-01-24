@@ -1,9 +1,18 @@
 // FILE: src/minisite/catalog/catalogCore.js
 // Core helpers + API calls + snapshot builder for Catalog.
+//
+// Phase 1 rule (critical):
+// - DO NOT persist playbackUrl into snapshots / local project storage.
+// - Persist only stable references (s3Key, fileName).
+// - Playback URLs must be resolved at runtime (e.g., via /api/playback-url?s3Key=...).
 
-export const DEFAULT_API_BASE = String(import.meta?.env?.VITE_API_BASE || "https://album-backend-c7ed.onrender.com")
+export const DEFAULT_API_BASE = String(import.meta?.env?.VITE_API_BASE || "")
   .trim()
   .replace(/\/+$/, "");
+
+if (!DEFAULT_API_BASE) {
+  throw new Error("Missing VITE_API_BASE (e.g. https://album-backend-kmuo.onrender.com)");
+}
 
 export const MASTER_SAVE_ENDPOINT = `${DEFAULT_API_BASE}/api/master-save`;
 export const MAX_UPLOAD_MB = 25;
@@ -39,6 +48,11 @@ export function saveProject(id, obj) {
   localStorage.setItem(projectKey(id), JSON.stringify(obj || {}));
 }
 
+/**
+ * NOTE:
+ * playbackUrl exists only for runtime/UI convenience.
+ * It is intentionally NOT persisted into snapshots.
+ */
 export function emptySong(slot) {
   return {
     slot,
@@ -103,6 +117,9 @@ function makeUploadKey({ projectId, slot, versionKey, fileName }) {
   return `storage/projects/${projectId}/catalog/uploads/song_${slot}/${versionKey}/${ts}__${clean}`;
 }
 
+// keep for parity (not used in static-site mode)
+void makeUploadKey;
+
 /**
  * Uploads a file via backend:
  * POST /api/upload-to-s3?projectId=...
@@ -111,13 +128,16 @@ function makeUploadKey({ projectId, slot, versionKey, fileName }) {
  * smartbridge2 is a STATIC SITE. It must NOT call /api/upload-to-s3.
  * Uploading is out-of-scope in this deployment and belongs to the publisher/admin backend.
  */
-export async function uploadSongFile({ apiBase = DEFAULT_API_BASE, projectId, slot, versionKey, file }) {
-  // Hard stop so Catalog cannot accidentally attempt uploads from this static deployment.
+export async function uploadSongFile() {
   throw new Error("upload-to-s3 disabled on smartbridge2 (static site). Upload in publisher/admin backend.");
 }
 
 /* ---------------- Playback URL ---------------- */
 
+/**
+ * Resolve a playable URL at runtime from a stable s3Key.
+ * Backend MUST return a fresh playable url, not a stale persisted one.
+ */
 export async function fetchPlaybackUrl({ apiBase = DEFAULT_API_BASE, s3Key }) {
   const base = String(apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
   const key = String(s3Key || "").trim();
@@ -131,7 +151,6 @@ export async function fetchPlaybackUrl({ apiBase = DEFAULT_API_BASE, s3Key }) {
 
 /* ---------------- Snapshot / Master Save ---------------- */
 
-// Human-facing locked catalog shape (fine to keep)
 export function buildLockedCatalog(project) {
   const songs = Array.isArray(project?.catalog?.songs) ? project.catalog.songs : [];
   const lockedSongs = songs.map((s) => ({
@@ -156,7 +175,10 @@ export function buildLockedCatalog(project) {
   return { songCount: lockedSongs.length, songs: lockedSongs };
 }
 
-// Normalize to the shape your UI + publish read: project.catalog.songs[] with files.*.playbackUrl
+/**
+ * Normalize Catalog songs for snapshot storage.
+ * CRITICAL: playbackUrl is always blanked to prevent persisting expiring signed URLs.
+ */
 function normalizeCatalogSongsForProject(project) {
   const songs = Array.isArray(project?.catalog?.songs) ? project.catalog.songs : [];
   return songs.map((s) => {
@@ -183,17 +205,17 @@ function normalizeCatalogSongsForProject(project) {
         album: {
           fileName: String(files?.album?.fileName || ""),
           s3Key: String(files?.album?.s3Key || ""),
-          playbackUrl: String(files?.album?.playbackUrl || ""),
+          playbackUrl: "", // do not persist
         },
         a: {
           fileName: String(files?.a?.fileName || ""),
           s3Key: String(files?.a?.s3Key || ""),
-          playbackUrl: String(files?.a?.playbackUrl || ""),
+          playbackUrl: "", // do not persist
         },
         b: {
           fileName: String(files?.b?.fileName || ""),
           s3Key: String(files?.b?.s3Key || ""),
-          playbackUrl: String(files?.b?.playbackUrl || ""), // ✅ FIXED (was playbackbackUrl)
+          playbackUrl: "", // do not persist
         },
       },
     };
@@ -208,10 +230,6 @@ function deriveAlbumSongTitlesFromCatalogSongs(catalogSongs) {
   }));
 }
 
-/**
- * buildSnapshot returns a wrapper snapshot that contains snapshot.project
- * (use snapshot.project as the canonical project object).
- */
 export function buildSnapshot({ projectId, project }) {
   const now = new Date().toISOString();
   const pid = String(projectId || "").trim();
@@ -255,22 +273,14 @@ export function buildSnapshot({ projectId, project }) {
   };
 }
 
-// Backend wants just the full project object
 export function projectForBackendFromSnapshot(snapshot) {
   return snapshot?.project || {};
 }
 
-/**
- * POST /api/master-save
- * Body: { projectId, project }
- * Returns: { ok:true, snapshotKey, latestKey }
- */
-export async function postMasterSave({
-  apiBase = DEFAULT_API_BASE,
-  projectId,
-  projectForBackend,
-}) {
-  const res = await fetch(`${apiBase}/api/master-save`, {
+export async function postMasterSave({ apiBase = DEFAULT_API_BASE, projectId, projectForBackend }) {
+  const base = String(apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
+
+  const res = await fetch(`${base}/api/master-save`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -280,37 +290,6 @@ export async function postMasterSave({
   });
 
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json?.error || `Master Save failed (${res.status})`);
-
-  // json is: { ok:true, snapshotKey, latestKey }
-  const snapshotKey = String(json?.snapshotKey || "");
-  const savedAt = new Date().toISOString();
-
-  // ✅ Persist global master flags into local project immediately
-  // so ALL pages can read it from localStorage consistently.
-  try {
-    const current = loadProject(projectId) || projectForBackend || {};
-    const next = {
-      ...current,
-      master: {
-        ...(current.master || {}),
-        isMasterSaved: true,
-        masterSavedAt: savedAt,
-        lastSnapshotKey: snapshotKey,
-        producerReturnReceived: current?.master?.producerReturnReceived ?? false,
-        producerReturnReceivedAt: current?.master?.producerReturnReceivedAt || "",
-      },
-      // optional convenience mirror
-      publish: {
-        ...(current.publish || {}),
-        snapshotKey: snapshotKey,
-      },
-      updatedAt: savedAt,
-    };
-    saveProject(projectId, next);
-  } catch (e) {
-    console.warn("postMasterSave: failed to persist local master flags", e);
-  }
-
+  if (!res.ok || json?.ok !== true) throw new Error(json?.error || `Master Save failed (${res.status})`);
   return json;
 }
