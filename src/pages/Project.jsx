@@ -4,17 +4,15 @@ import { Link, useParams } from "react-router-dom";
 
 /**
  * Project detail page (internal/admin)
- * Adds Magic Link controls:
+ * Magic Link controls:
  * - Send (create/activate + copy link)
  * - Resend (copy same active link)
  * - Expire (deactivate)
  * - Admin Preview (bypass, opens minisite with ?admin=1)
  *
- * Notes:
- * - Uses the existing project_{projectId} blob as the source of truth for magic state.
- * - Also writes a token lookup row: sb:magic:<token> so /p/:token resolvers can work later.
- * - If you are currently using the "LS_MAGIC" global store approach, you can remove the lookup bits
- *   and keep just snap.magic (this file doesn't require new folders).
+ * Storage:
+ * - project_{projectId} blob is source of truth (snap.magic)
+ * - optional lookup row: sb:magic:<token>
  */
 
 function safeParse(json) {
@@ -37,13 +35,12 @@ function indexKey(producerId) {
   return `sb:projects_index:${String(producerId || "no-producer")}`;
 }
 
-// Token lookup (optional but recommended if you later add /p/:token routes)
+// Token lookup (optional, future /p/:token routes)
 function magicKey(token) {
   return `sb:magic:${String(token || "")}`;
 }
 
 function makeToken() {
-  // local-only token, URL-safe
   const a = Math.random().toString(36).slice(2);
   const b = Math.random().toString(36).slice(2);
   return `${a}${b}`.slice(0, 24);
@@ -81,6 +78,45 @@ function loadProjectLocal(projectId) {
   return parsed && typeof parsed === "object" ? parsed : null;
 }
 
+function seedProjectIfMissing(projectId) {
+  const existing = loadProjectLocal(projectId);
+  if (existing) return existing;
+
+  const nowIso = new Date().toISOString();
+  const seed = {
+    projectId: safeString(projectId),
+    projectName: "Project",
+    producerId: "",
+    company: "",
+    date: "",
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    catalog: { songs: [] },
+    album: { meta: {} },
+    nftMix: {},
+    songs: {},
+    meta: { songs: [] },
+    magic: { token: "", active: false, expiresAt: "", sentAt: "" },
+    master: {
+      isMasterSaved: false,
+      masterSavedAt: "",
+      lastSnapshotKey: "",
+      producerReturnReceived: false,
+      producerReturnReceivedAt: "",
+    },
+    publish: {
+      lastShareId: "",
+      lastPublicUrl: "",
+      publishedAt: "",
+      manifestKey: "",
+      snapshotKey: "",
+    },
+  };
+
+  localStorage.setItem(projectKey(projectId), JSON.stringify(seed));
+  return seed;
+}
+
 function loadPublishFromProducerIndex(producerId, projectId) {
   if (!producerId || !projectId) return null;
   const raw = localStorage.getItem(indexKey(producerId));
@@ -106,13 +142,13 @@ export default function Project() {
 
   useEffect(() => {
     if (!projectId) return;
-    setSnap(loadProjectLocal(projectId));
+    setSnap(seedProjectIfMissing(projectId));
   }, [projectId]);
 
   useEffect(() => {
     const onFocus = () => {
       if (!projectId) return;
-      setSnap(loadProjectLocal(projectId));
+      setSnap(seedProjectIfMissing(projectId));
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
@@ -122,7 +158,7 @@ export default function Project() {
     const onStorage = (e) => {
       if (!projectId) return;
       if (e?.key === projectKey(projectId) || e?.key?.includes("sb:projects_index:")) {
-        setSnap(loadProjectLocal(projectId));
+        setSnap(seedProjectIfMissing(projectId));
       }
     };
     window.addEventListener("storage", onStorage);
@@ -177,8 +213,6 @@ export default function Project() {
 
   const magicUrl = useMemo(() => {
     if (!magic.token) return "";
-    // Current minisite-gate style (token in query)
-    // If you switch to /p/:token later, change this line accordingly.
     return `${window.location.origin}/minisite/${projectId}/catalog?token=${encodeURIComponent(
       magic.token
     )}`;
@@ -201,23 +235,16 @@ export default function Project() {
   };
 
   const sendMagic = async () => {
-    if (!snap) return;
     if (!projectId) return;
-
-    if (!producerId) {
-      window.alert("Missing producerId on project.");
-      return;
-    }
+    const base = snap || seedProjectIfMissing(projectId);
 
     const nowIso = new Date().toISOString();
 
-    // Resend should not mint a new token; Send mints only when none/expired.
-    const currentlyActive = isMagicActive(snap?.magic);
-    let nextToken = safeString(snap?.magic?.token);
-
+    // Mint only when none OR expired/inactive
+    const currentlyActive = isMagicActive(base?.magic);
+    let nextToken = safeString(base?.magic?.token);
     if (!nextToken || !currentlyActive) nextToken = makeToken();
 
-    // Default expiry: 72 hours (match your note). Adjust anytime.
     const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
 
     const nextMagic = {
@@ -227,14 +254,13 @@ export default function Project() {
       sentAt: nowIso,
     };
 
-    const next = { ...snap, magic: nextMagic, updatedAt: nowIso };
+    const next = { ...base, magic: nextMagic, updatedAt: nowIso };
     saveSnap(next);
 
-    // Optional lookup row for future /p/:token routing
     upsertMagicLookup({
       token: nextToken,
       projectId,
-      producerId,
+      producerId: safeString(next?.producerId),
       expiresAt,
       active: true,
     });
@@ -245,10 +271,11 @@ export default function Project() {
   };
 
   const resendMagic = async () => {
-    if (!snap) return;
+    if (!projectId) return;
+    const base = snap || seedProjectIfMissing(projectId);
 
-    const token = safeString(snap?.magic?.token);
-    if (!token || !isMagicActive(snap?.magic)) {
+    const token = safeString(base?.magic?.token);
+    if (!token || !isMagicActive(base?.magic)) {
       window.alert("No active magic link to resend. Use Send to create a new one.");
       return;
     }
@@ -259,27 +286,27 @@ export default function Project() {
   };
 
   const expireMagic = () => {
-    if (!snap) return;
+    if (!projectId) return;
+    const base = snap || seedProjectIfMissing(projectId);
 
-    const token = safeString(snap?.magic?.token);
+    const token = safeString(base?.magic?.token);
     if (!token) return;
 
     const nowIso = new Date().toISOString();
 
     const nextMagic = {
-      ...snap.magic,
+      ...base.magic,
       active: false,
-      expiresAt: nowIso, // mark as expired now
+      expiresAt: nowIso,
     };
 
-    const next = { ...snap, magic: nextMagic, updatedAt: nowIso };
+    const next = { ...base, magic: nextMagic, updatedAt: nowIso };
     saveSnap(next);
 
-    // Optional lookup row update
     upsertMagicLookup({
       token,
       projectId,
-      producerId,
+      producerId: safeString(next?.producerId),
       expiresAt: nowIso,
       active: false,
     });
@@ -288,17 +315,12 @@ export default function Project() {
   };
 
   const adminPreview = () => {
-    const token = safeString(snap?.magic?.token);
-    if (!token) {
+    const url = magicUrl;
+    if (!url) {
       window.alert("No token yet. Click Send first.");
       return;
     }
-    // current minisite-gate bypass pattern
-    window.open(
-      `/minisite/${projectId}/catalog?token=${encodeURIComponent(token)}&admin=1`,
-      "_blank",
-      "noreferrer"
-    );
+    window.open(`${url}&admin=1`, "_blank", "noreferrer");
   };
 
   return (
@@ -340,7 +362,6 @@ export default function Project() {
         </div>
       </div>
 
-      {/* Magic link controls live ONLY here (Project page) */}
       <div style={{ marginTop: 14, ...card() }}>
         <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>
           Magic Link (producer)
@@ -390,11 +411,7 @@ export default function Project() {
         <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.7 }}>
           <div>
             Published At:{" "}
-            {pub?.publishedAt ? (
-              <code>{pub.publishedAt}</code>
-            ) : (
-              <span style={{ opacity: 0.65 }}>—</span>
-            )}
+            {pub?.publishedAt ? <code>{pub.publishedAt}</code> : <span style={{ opacity: 0.65 }}>—</span>}
           </div>
           <div>
             Share ID:{" "}
