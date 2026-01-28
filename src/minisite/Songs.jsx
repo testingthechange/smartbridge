@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { useSongsMasterSave } from "./songs/useSongsMasterSave";
 import { BridgePreviewPlayer, ABCTimelinePlayer } from "./songs/components/Players";
-import { loadProject, saveProject } from "./minisite/catalog/catalogCore.js";
+import { loadProject, saveProject } from "./catalogCore.js";
 
 const SONG_COUNT = 9;
 const MASTER_SAVE_MIN_SHEETS = 8; // allow Master Save once 8/9 (or 9/9) worksheets are complete
