@@ -1,14 +1,15 @@
+// vite.config.js
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  optimizeDeps: {
+    entries: ["index.html"], // IMPORTANT: do not scan nested smartbridge/index.html
+  },
   server: {
-    proxy: {
-      "/api": {
-        target: "http://localhost:8787",
-        changeOrigin: true,
-      },
+    watch: {
+      ignored: ["**/smartbridge/**"], // avoid double-watch loops
     },
   },
 });

@@ -55,7 +55,6 @@ function savePublishResultToLocal({ projectId, producerId, snapshotKey, shareId,
 
   const nowIso = new Date().toISOString();
 
-  // update project blob
   const proj = loadProjectLocal(projectId);
   if (proj) {
     proj.publish = {
@@ -64,14 +63,12 @@ function savePublishResultToLocal({ projectId, producerId, snapshotKey, shareId,
       lastPublicUrl: String(publicUrl || ""),
       manifestKey: String(manifestKey || ""),
       publishedAt: nowIso,
-      // IMPORTANT: store the REAL S3 snapshotKey returned by backend (if any)
       snapshotKey: String(snapshotKey || ""),
     };
     proj.updatedAt = nowIso;
     saveProjectLocal(projectId, proj);
   }
 
-  // mirror into producer-scoped index row
   if (producerId) {
     const rows = loadProjectsIndex(producerId);
     const next = (rows || []).map((r) => {
@@ -96,19 +93,15 @@ function savePublishResultToLocal({ projectId, producerId, snapshotKey, shareId,
 export default function ExportTools() {
   const { projectId } = useParams();
 
-  // ✅ single source of truth; match Catalog.jsx
+  // single source of truth
   const API_BASE = useMemo(() => {
     return String(import.meta.env.VITE_API_BASE || "").trim().replace(/\/+$/, "");
   }, []);
-
-  // ✅ IMPORTANT: this field must be allowed to stay blank (no auto-repopulate)
-  const [snapshotKey, setSnapshotKey] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [err, setErr] = useState("");
 
-  // Load local publish + producerId (so we can mirror into the right projects index)
   const proj = useMemo(() => (projectId ? loadProjectLocal(projectId) : null), [projectId, result]);
   const producerId = safeString(proj?.producerId);
 
@@ -122,8 +115,8 @@ export default function ExportTools() {
 
     if (!API_BASE) {
       return window.alert(
-        "Missing VITE_API_BASE. Set it on the Render Static Site and redeploy.\n" +
-          "Example: VITE_API_BASE=https://album-backend-kmuo.onrender.com"
+        "Missing VITE_API_BASE.\n" +
+          "Example:\nVITE_API_BASE=https://album-backend-kmuo.onrender.com"
       );
     }
 
@@ -132,10 +125,8 @@ export default function ExportTools() {
     setResult(null);
 
     try {
-      const snap = normalizeSnapshotKey(snapshotKey);
-
-      // ✅ Allow publishing without snapshotKey (backend will use producer_returns/latest.json)
-      const body = snap ? { projectId, snapshotKey: snap } : { projectId };
+      // ✅ Always publish latest (backend uses producer_returns/latest.json)
+      const body = { projectId };
 
       const r = await fetch(`${API_BASE}/api/publish-minisite`, {
         method: "POST",
@@ -148,7 +139,6 @@ export default function ExportTools() {
 
       setResult(j);
 
-      // ✅ Persist the REAL snapshotKey returned by backend (if present)
       const returnedSnapshotKey = normalizeSnapshotKey(j?.snapshotKey);
 
       savePublishResultToLocal({
@@ -159,9 +149,6 @@ export default function ExportTools() {
         publicUrl: j.publicUrl,
         manifestKey: j.manifestKey,
       });
-
-      // ✅ Do NOT auto-fill the input (keep blank behavior)
-      // If you want to show what was used, rely on the Result panel instead.
     } catch (e) {
       setErr(e?.message || String(e));
     } finally {
@@ -169,9 +156,13 @@ export default function ExportTools() {
     }
   };
 
+  const lastShareId = safeString(published?.lastShareId);
+  const lastPublicUrl = safeString(published?.lastPublicUrl);
+
   return (
     <div style={{ maxWidth: 1100 }}>
-      <div style={{ fontSize: 24, fontWeight: 900, color: "#0f172a" }}>Export / Tools</div>
+    <div style={{ fontSize: 24, fontWeight: 900, color: "#0f172a" }}>Export / Tools (OPTION A BUILD)</div>
+
       <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
         Project ID: <code>{projectId}</code>
       </div>
@@ -181,46 +172,47 @@ export default function ExportTools() {
       </div>
 
       <div style={{ marginTop: 14, ...card() }}>
-        <div style={{ fontSize: 18, fontWeight: 900, color: "#0f172a" }}>Publisher (S3)</div>
-
-        <div style={{ marginTop: 12, fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>
-          Snapshot Key (optional)
-        </div>
-
-        <div style={{ marginTop: 8, display: "flex", gap: 12, alignItems: "center" }}>
-          <input
-            value={snapshotKey}
-            onChange={(e) => setSnapshotKey(e.target.value)}
-            placeholder="(leave blank to publish latest master-save)"
-            style={input()}
-          />
+        <div style={{ display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 900, color: "#0f172a" }}>Publisher (S3)</div>
+            <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>
+              Publishes from <code>producer_returns/latest.json</code>.
+            </div>
+          </div>
 
           <button type="button" onClick={doPublish} disabled={loading} style={primaryBtn(loading)}>
             {loading ? "Publishing…" : "Publish Mini-site"}
           </button>
         </div>
 
-        <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
-          If blank, the backend publishes from <code>producer_returns/latest.json</code>.
-        </div>
-
         {err ? <div style={{ marginTop: 12, ...errorBox() }}>{err}</div> : null}
 
-        <div style={{ marginTop: 18, fontSize: 18, fontWeight: 900, color: "#0f172a" }}>Published URL</div>
-        <div style={{ marginTop: 8, fontSize: 13 }}>
-          {published?.lastPublicUrl ? (
-            <a href={published.lastPublicUrl} target="_blank" rel="noreferrer">
-              {published.lastPublicUrl}
-            </a>
-          ) : (
-            <span style={{ opacity: 0.65 }}>—</span>
-          )}
+        <div style={{ marginTop: 18, fontSize: 18, fontWeight: 900, color: "#0f172a" }}>Published</div>
+
+        <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "160px 1fr", rowGap: 8, columnGap: 12 }}>
+          <div style={label()}>Share ID</div>
+          <div style={valueMono()}>{lastShareId || "—"}</div>
+
+          <div style={label()}>Public URL</div>
+          <div style={valueMono()}>
+            {lastPublicUrl ? (
+              <a href={lastPublicUrl} target="_blank" rel="noreferrer">
+                {lastPublicUrl}
+              </a>
+            ) : (
+              "—"
+            )}
+          </div>
+
+          <div style={label()}>Published At</div>
+          <div style={valueMono()}>{safeString(published?.publishedAt) || "—"}</div>
+
+          <div style={label()}>Snapshot Key</div>
+          <div style={valueMono()}>{safeString(published?.snapshotKey) || "—"}</div>
         </div>
 
         <div style={{ marginTop: 18, fontSize: 18, fontWeight: 900, color: "#0f172a" }}>Result</div>
-        <pre style={pre()}>
-          {result ? JSON.stringify(result, null, 2) : published ? JSON.stringify(published, null, 2) : "{\n  \n}"}
-        </pre>
+        <pre style={pre()}>{result ? JSON.stringify(result, null, 2) : published ? JSON.stringify(published, null, 2) : "{\n  \n}"}</pre>
       </div>
     </div>
   );
@@ -232,17 +224,12 @@ function card() {
   return { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: 16 };
 }
 
-function input() {
-  return {
-    flex: 1,
-    padding: "12px 12px",
-    borderRadius: 14,
-    border: "1px solid #d1d5db",
-    fontSize: 15,
-    outline: "none",
-    background: "#fff",
-    fontFamily: "monospace",
-  };
+function label() {
+  return { fontSize: 12, fontWeight: 900, opacity: 0.65, textTransform: "uppercase" };
+}
+
+function valueMono() {
+  return { fontSize: 13, fontFamily: "monospace", opacity: 0.9 };
 }
 
 function primaryBtn(disabled) {
