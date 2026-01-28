@@ -1,5 +1,5 @@
 // src/pages/ExportTools.jsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 
 function safeParse(json) {
@@ -8,6 +8,10 @@ function safeParse(json) {
   } catch {
     return null;
   }
+}
+
+function safeString(v) {
+  return String(v ?? "").trim();
 }
 
 function projectKey(projectId) {
@@ -38,12 +42,19 @@ function saveProjectsIndex(producerId, rows) {
   localStorage.setItem(indexKey(producerId), JSON.stringify(Array.isArray(rows) ? rows : []));
 }
 
+function normalizeSnapshotKey(k) {
+  const s = safeString(k);
+  if (!s) return "";
+  // masterSnapshot_* is NOT a real S3 key; ignore it
+  if (s.startsWith("masterSnapshot_")) return "";
+  return s;
+}
+
 function savePublishResultToLocal({ projectId, producerId, snapshotKey, shareId, publicUrl, manifestKey }) {
   if (!projectId) return;
 
   const nowIso = new Date().toISOString();
 
-  // update project blob
   const proj = loadProjectLocal(projectId);
   if (proj) {
     proj.publish = {
@@ -58,7 +69,6 @@ function savePublishResultToLocal({ projectId, producerId, snapshotKey, shareId,
     saveProjectLocal(projectId, proj);
   }
 
-  // mirror into producer-scoped index row
   if (producerId) {
     const rows = loadProjectsIndex(producerId);
     const next = (rows || []).map((r) => {
@@ -83,75 +93,45 @@ function savePublishResultToLocal({ projectId, producerId, snapshotKey, shareId,
 export default function ExportTools() {
   const { projectId } = useParams();
 
-  const API_BASE = String(import.meta.env.VITE_BACKEND_URL || "").replace(/\/+$/, "");
+  // single source of truth
+  const API_BASE = useMemo(() => {
+    return String(import.meta.env.VITE_API_BASE || "").trim().replace(/\/+$/, "");
+  }, []);
 
-  const [snapshotKey, setSnapshotKey] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [err, setErr] = useState("");
 
-  // Load local publish + producerId (so we can mirror into the right projects index)
-  const proj = useMemo(() => (projectId ? loadProjectLocal(projectId) : null), [projectId]);
-  const producerId = String(proj?.producerId || "").trim();
+  const proj = useMemo(() => (projectId ? loadProjectLocal(projectId) : null), [projectId, result]);
+  const producerId = safeString(proj?.producerId);
 
   const published = useMemo(() => {
     if (!proj) return null;
     return proj.publish || null;
-  }, [proj, result]);
-
-  // 1) Hydrate snapshotKey from local project.publish.snapshotKey if present
-  useEffect(() => {
-    if (!projectId) return;
-    const k = String(proj?.publish?.snapshotKey || "").trim();
-    if (k) setSnapshotKey(k);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
-
-  // 2) If snapshotKey still blank, fetch it from backend latest master-save
-  useEffect(() => {
-    if (!projectId) return;
-    if (!API_BASE) return;
-    if (snapshotKey.trim()) return;
-
-    let cancelled = false;
-
-    async function run() {
-      try {
-        const r = await fetch(`${API_BASE}/api/master-save/latest/${encodeURIComponent(projectId)}`);
-        const j = await r.json().catch(() => ({}));
-        if (!r.ok || !j?.ok) return;
-
-        const k =
-          String(j?.latest?.latestSnapshotKey || "").trim() ||
-          String(j?.latestSnapshotKey || "").trim();
-
-        if (!cancelled && k) setSnapshotKey(k);
-      } catch {
-        // ignore
-      }
-    }
-
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [API_BASE, projectId, snapshotKey]);
+  }, [proj]);
 
   const doPublish = async () => {
     if (!projectId) return;
-    if (!API_BASE) return window.alert("Missing VITE_BACKEND_URL in .env.local");
-    if (!snapshotKey.trim()) return window.alert("Snapshot Key required.");
+
+    if (!API_BASE) {
+      return window.alert(
+        "Missing VITE_API_BASE.\n" +
+          "Example:\nVITE_API_BASE=https://album-backend-kmuo.onrender.com"
+      );
+    }
 
     setLoading(true);
     setErr("");
     setResult(null);
 
     try {
-      // ✅ FIX: backend route is /api/publish-minisite (NOT /api/publish)
+      // ✅ Always publish latest (backend uses producer_returns/latest.json)
+      const body = { projectId };
+
       const r = await fetch(`${API_BASE}/api/publish-minisite`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId, snapshotKey: snapshotKey.trim() }),
+        body: JSON.stringify(body),
       });
 
       const j = await r.json().catch(() => ({}));
@@ -159,11 +139,12 @@ export default function ExportTools() {
 
       setResult(j);
 
-      // ✅ persist publish output so it never “vanishes”
+      const returnedSnapshotKey = normalizeSnapshotKey(j?.snapshotKey);
+
       savePublishResultToLocal({
         projectId,
         producerId,
-        snapshotKey: snapshotKey.trim(),
+        snapshotKey: returnedSnapshotKey,
         shareId: j.shareId,
         publicUrl: j.publicUrl,
         manifestKey: j.manifestKey,
@@ -175,48 +156,59 @@ export default function ExportTools() {
     }
   };
 
+  const lastShareId = safeString(published?.lastShareId);
+  const lastPublicUrl = safeString(published?.lastPublicUrl);
+
   return (
     <div style={{ maxWidth: 1100 }}>
-      <div style={{ fontSize: 24, fontWeight: 900, color: "#0f172a" }}>Export / Tools</div>
+    <div style={{ fontSize: 24, fontWeight: 900, color: "#0f172a" }}>Export / Tools (OPTION A BUILD)</div>
+
       <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
         Project ID: <code>{projectId}</code>
       </div>
 
+      <div style={{ marginTop: 10, fontSize: 11, opacity: 0.6 }}>
+        Backend: <span style={{ fontFamily: "monospace" }}>{API_BASE || "—"}</span>
+      </div>
+
       <div style={{ marginTop: 14, ...card() }}>
-        <div style={{ fontSize: 18, fontWeight: 900, color: "#0f172a" }}>Publisher (S3)</div>
-
-        <div style={{ marginTop: 12, fontSize: 12, fontWeight: 900, opacity: 0.7, textTransform: "uppercase" }}>
-          Snapshot Key
-        </div>
-
-        <div style={{ marginTop: 8, display: "flex", gap: 12, alignItems: "center" }}>
-          <input
-            value={snapshotKey}
-            onChange={(e) => setSnapshotKey(e.target.value)}
-            placeholder="storage/projects/123456/producer_returns/snapshots/2025-12-21T....json"
-            style={input()}
-          />
+        <div style={{ display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 900, color: "#0f172a" }}>Publisher (S3)</div>
+            <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>
+              Publishes from <code>producer_returns/latest.json</code>.
+            </div>
+          </div>
 
           <button type="button" onClick={doPublish} disabled={loading} style={primaryBtn(loading)}>
             {loading ? "Publishing…" : "Publish Mini-site"}
           </button>
         </div>
 
-        <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
-          If this field is blank, do a Master Save first (Catalog or Album), then come back here.
-        </div>
-
         {err ? <div style={{ marginTop: 12, ...errorBox() }}>{err}</div> : null}
 
-        <div style={{ marginTop: 18, fontSize: 18, fontWeight: 900, color: "#0f172a" }}>Published URL</div>
-        <div style={{ marginTop: 8, fontSize: 13 }}>
-          {published?.lastPublicUrl ? (
-            <a href={published.lastPublicUrl} target="_blank" rel="noreferrer">
-              {published.lastPublicUrl}
-            </a>
-          ) : (
-            <span style={{ opacity: 0.65 }}>—</span>
-          )}
+        <div style={{ marginTop: 18, fontSize: 18, fontWeight: 900, color: "#0f172a" }}>Published</div>
+
+        <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "160px 1fr", rowGap: 8, columnGap: 12 }}>
+          <div style={label()}>Share ID</div>
+          <div style={valueMono()}>{lastShareId || "—"}</div>
+
+          <div style={label()}>Public URL</div>
+          <div style={valueMono()}>
+            {lastPublicUrl ? (
+              <a href={lastPublicUrl} target="_blank" rel="noreferrer">
+                {lastPublicUrl}
+              </a>
+            ) : (
+              "—"
+            )}
+          </div>
+
+          <div style={label()}>Published At</div>
+          <div style={valueMono()}>{safeString(published?.publishedAt) || "—"}</div>
+
+          <div style={label()}>Snapshot Key</div>
+          <div style={valueMono()}>{safeString(published?.snapshotKey) || "—"}</div>
         </div>
 
         <div style={{ marginTop: 18, fontSize: 18, fontWeight: 900, color: "#0f172a" }}>Result</div>
@@ -232,16 +224,12 @@ function card() {
   return { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: 16 };
 }
 
-function input() {
-  return {
-    flex: 1,
-    padding: "12px 12px",
-    borderRadius: 14,
-    border: "1px solid #d1d5db",
-    fontSize: 15,
-    outline: "none",
-    background: "#fff",
-  };
+function label() {
+  return { fontSize: 12, fontWeight: 900, opacity: 0.65, textTransform: "uppercase" };
+}
+
+function valueMono() {
+  return { fontSize: 13, fontFamily: "monospace", opacity: 0.9 };
 }
 
 function primaryBtn(disabled) {
@@ -278,5 +266,6 @@ function errorBox() {
     border: "1px solid #fecaca",
     padding: 10,
     borderRadius: 12,
+    whiteSpace: "pre-wrap",
   };
 }
