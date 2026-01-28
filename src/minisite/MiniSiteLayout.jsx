@@ -8,22 +8,35 @@ import MasterSaveBar from "../components/MasterSaveBar.jsx";
 export default function MiniSiteLayout() {
   const { projectId } = useParams();
   const [searchParams] = useSearchParams();
-  const token = searchParams.get("token") || "";
+
+  const token = (searchParams.get("token") || "").trim();
+  const isAdmin = (searchParams.get("admin") || "").trim() === "1";
+
+  // Producer view = token present AND not admin preview
+  const isProducerView = !!token && !isAdmin;
 
   const pid = projectId || "demo";
 
-  // IMPORTANT:
-  // This layout is used by nested routes in App.jsx.
-  // So we render <Outlet /> here, not a manual page switch.
   return (
     <ProjectMiniSiteProvider projectId={pid}>
       <div style={{ padding: 16 }}>
-        {/* optional small header (can remove if you want) */}
-        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
-          Project: <b>{pid}</b> • Token: <span style={{ fontFamily: "monospace" }}>{token}</span>
-        </div>
+        {/* Always-safe header: keep only the small producer header requirements.
+            IMPORTANT: do NOT reveal internal nav or admin UI in producer view. */}
+        {isProducerView ? (
+          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+            Project: <b>{pid}</b>
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+            Project: <b>{pid}</b> • Token:{" "}
+            <span style={{ fontFamily: "monospace" }}>{token || "—"}</span>{" "}
+            {isAdmin ? <span style={{ marginLeft: 8 }}>(admin)</span> : null}
+          </div>
+        )}
 
-        <MasterSaveBar />
+        {/* Internal-only UI must be hidden from producer magic-link view */}
+        {!isProducerView ? <MasterSaveBar /> : null}
+
         <Outlet />
       </div>
     </ProjectMiniSiteProvider>
