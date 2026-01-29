@@ -1,6 +1,7 @@
-// src/minisite/NFTMix.jsx
+// FILE: src/minisite/NFTMix.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
+import { API_BASE as API_BASE_ENV, requireApiBase } from "../lib/api/apiBase.js";
 
 const SONG_COUNT = 9;
 
@@ -9,7 +10,8 @@ export default function NFTMix() {
   const [searchParams] = useSearchParams();
   const token = searchParams.get("token") || "";
 
-  const API_BASE = String(import.meta.env.VITE_BACKEND_URL || "").replace(/\/+$/, "");
+  // Canonical env var: VITE_API_BASE (legacy VITE_BACKEND_URL supported in apiBase.js)
+  const API_BASE = String(API_BASE_ENV || "").replace(/\/+$/, "");
   const storageKey = (k) => `sb:${projectId}:nftmix:${k}`;
 
   const [loading, setLoading] = useState(false);
@@ -61,7 +63,6 @@ export default function NFTMix() {
     try {
       localStorage.setItem(storageKey("glueLines"), JSON.stringify(nextGlue));
     } catch (e) {
-      // If this fails, we STILL try project blob below
       console.warn("Failed writing sb glueLines:", e);
     }
 
@@ -117,7 +118,6 @@ export default function NFTMix() {
   }
 
   function sanitizeGlueLines(arr) {
-    // ensure shape + no weird undefineds
     const safe = (Array.isArray(arr) ? arr : []).map((l) => ({
       id: String(l?.id || `glue-${Number(l?.fromSlot) || 0}-to-${Number(l?.toSlot) || 0}`),
       fromSlot: Number(l?.fromSlot) || 0,
@@ -128,7 +128,6 @@ export default function NFTMix() {
       bridgePlaybackUrl: String(l?.bridgePlaybackUrl || ""),
     }));
 
-    // If empty/invalid, keep a sane default
     if (!safe.length) {
       return Array.from({ length: SONG_COUNT - 1 }).map((_, i) => ({
         id: `glue-${i + 1}-to-${i + 2}`,
@@ -150,7 +149,6 @@ export default function NFTMix() {
     if (!projectId) return;
     hydrateGlueLines();
 
-    // also hydrate Master Save badge if present
     const proj = loadProjectLocal(projectId);
     const savedAt = safeString(proj?.nftMix?.masterSave?.savedAt);
     const snapshotKey = safeString(proj?.nftMix?.masterSave?.snapshotKey);
@@ -169,8 +167,11 @@ export default function NFTMix() {
 
   useEffect(() => {
     if (!projectId) return;
-    if (!API_BASE) {
-      setLoadErr("Missing VITE_BACKEND_URL in .env.local");
+
+    try {
+      requireApiBase(API_BASE);
+    } catch (e) {
+      setLoadErr(e?.message || "Missing VITE_API_BASE");
       return;
     }
 
@@ -181,7 +182,9 @@ export default function NFTMix() {
       setLoadErr("");
 
       try {
-        const r = await fetch(`${API_BASE}/api/master-save/latest/${projectId}`);
+        const base = requireApiBase(API_BASE);
+
+        const r = await fetch(`${base}/api/master-save/latest/${projectId}`);
         const j = await r.json().catch(() => ({}));
         if (!r.ok || !j?.ok) throw new Error(j?.error || `HTTP ${r.status}`);
         if (cancelled) return;
@@ -209,9 +212,6 @@ export default function NFTMix() {
 
           const title = String(aTitle?.title || cSong?.title || "").trim() || `Song ${slot}`;
 
-          // supports BOTH shapes:
-          // - cSong.versions.A.s3Key
-          // - cSong.files.a.s3Key
           const aS3Key =
             String(cSong?.versions?.A?.s3Key || "").trim() ||
             String(cSong?.files?.a?.s3Key || "").trim() ||
@@ -288,49 +288,13 @@ export default function NFTMix() {
   const handlePickBridge = async (idx, file) => {
     if (!file) return;
     if (!projectId) return;
-    if (!API_BASE) return window.alert("Missing VITE_BACKEND_URL in .env.local");
-    if (glueLines[idx]?.locked) return;
 
-    try {
-      setLoadErr("");
+    // Static-site rule: do not upload from smartbridge2
+    window.alert("upload-to-s3 disabled on smartbridge2 (static site). Upload in publisher/admin backend.");
+    return;
 
-      // Convert to dataURL for backend upload
-      const dataUrl = await fileToDataUrl(file);
-
-      // Upload to S3 via backend
-      const up = await fetch(`${API_BASE}/api/upload-misc`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          projectId,
-          fileName: file.name,
-          base64: dataUrl,
-          mimeType: file.type || "audio/mpeg",
-        }),
-      });
-
-      const uj = await up.json().catch(() => ({}));
-      if (!up.ok || !uj?.ok) throw new Error(uj?.error || `Upload failed HTTP ${up.status}`);
-
-      const s3Key = String(uj.s3Key || "").trim();
-      if (!s3Key) throw new Error("Upload succeeded but missing s3Key");
-
-      // Get playback URL (presigned)
-      const playbackUrl = await fetchPlaybackUrl(API_BASE, s3Key);
-
-      setGlueLines((prev) => {
-        const copy = [...prev];
-        copy[idx] = {
-          ...copy[idx],
-          bridgeFileName: file.name,
-          bridgeS3Key: s3Key,
-          bridgePlaybackUrl: playbackUrl || "",
-        };
-        return copy;
-      });
-    } catch (e) {
-      window.alert(`Bridge upload failed:\n\n${e?.message || String(e)}`);
-    }
+    // (intentionally unreachable in static-site build)
+    // eslint-disable-next-line no-unreachable
   };
 
   const toggleLock = (idx) => {
@@ -426,7 +390,6 @@ export default function NFTMix() {
     rafRef.current = requestAnimationFrame(tick);
   };
 
-  // Preload durations so scrub mapping is accurate
   useEffect(() => {
     let cancelled = false;
 
@@ -438,9 +401,7 @@ export default function NFTMix() {
 
         const d = await probeDuration(s.url);
         if (cancelled) return;
-        if (d) {
-          setDurByKey((prev) => ({ ...prev, [s.key]: d }));
-        }
+        if (d) setDurByKey((prev) => ({ ...prev, [s.key]: d }));
       }
     }
 
@@ -506,9 +467,8 @@ export default function NFTMix() {
     };
 
     el.onended = () => {
-      if (idx < segments.length - 1) {
-        loadSegment(idx + 1, { autoplay: true, seekSeconds: 0 });
-      } else {
+      if (idx < segments.length - 1) loadSegment(idx + 1, { autoplay: true, seekSeconds: 0 });
+      else {
         setIsPlaying(false);
         stopRaf();
       }
@@ -673,7 +633,6 @@ export default function NFTMix() {
       return;
     }
 
-    // fallback preview only
     const el = audioRef.current;
     if (!el) return;
     stopRaf();
@@ -715,94 +674,16 @@ export default function NFTMix() {
 
   const handleMasterSave = async () => {
     if (!projectId) return;
-    if (!API_BASE) return window.alert("Missing VITE_BACKEND_URL in .env.local");
 
-    setMsErr("");
-    setMsOk(null);
-
-    const first = window.confirm(
-      "NFT Mix Master Save?\n\nThis will snapshot your current NFT Mix glue lines (bridges + locks)."
-    );
-    if (!first) return;
-
-    const second = window.confirm("Last chance.\n\nContinue with NFT Mix Master Save?");
-    if (!second) return;
-
-    setMsLoading(true);
-
-    try {
-      const nowIso = new Date().toISOString();
-      const proj = loadProjectLocal(projectId) || { projectId, createdAt: nowIso };
-
-      const nextProject = {
-        ...proj,
-        projectId: proj.projectId || projectId,
-        updatedAt: nowIso,
-        nftMix: {
-          ...(proj.nftMix || {}),
-          glueLines: safeGlueLinesForSave,
-          masterSave: {
-            ...(proj?.nftMix?.masterSave || {}),
-            savedAt: nowIso,
-          },
-        },
-        masterSave: {
-          ...(proj.masterSave || {}),
-          lastMasterSaveAt: nowIso,
-          sections: {
-            ...(proj?.masterSave?.sections || {}),
-            nftMix: {
-              complete: true,
-              masterSavedAt: nowIso,
-            },
-          },
-        },
-      };
-
-      saveProjectLocal(projectId, nextProject);
-
-      const r = await fetch(`${API_BASE}/api/master-save`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId, project: nextProject }),
-      });
-
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j?.ok) throw new Error(j?.error || `HTTP ${r.status}`);
-
-      const snapshotKey = safeString(j.snapshotKey || j.s3Key || "");
-      const savedAt = nowIso;
-
-      const finalProject = loadProjectLocal(projectId) || nextProject;
-      finalProject.nftMix = finalProject.nftMix || {};
-      finalProject.nftMix.masterSave = {
-        ...(finalProject.nftMix.masterSave || {}),
-        savedAt,
-        snapshotKey,
-      };
-      finalProject.masterSave = finalProject.masterSave || {};
-      finalProject.masterSave.sections = finalProject.masterSave.sections || {};
-      finalProject.masterSave.sections.nftMix = {
-        complete: true,
-        masterSavedAt: savedAt,
-        snapshotKey,
-      };
-      finalProject.updatedAt = savedAt;
-      saveProjectLocal(projectId, finalProject);
-
-      setMsOk({ savedAt, snapshotKey });
-    } catch (e) {
-      setMsErr(e?.message || String(e));
-    } finally {
-      setMsLoading(false);
-    }
+    // Static-site rule: do not master-save from smartbridge2
+    window.alert("Master Save disabled on smartbridge2 (static site). Use publisher/admin backend.");
+    return;
   };
 
   /* ---------------- UI ---------------- */
 
   return (
     <div style={{ maxWidth: 1200 }}>
-      {/* Small header */}
       <div style={{ fontSize: 11, opacity: 0.75, marginBottom: 12 }}>
         Project ID: <code>{projectId}</code>
         {token ? (
@@ -813,7 +694,6 @@ export default function NFTMix() {
         ) : null}
       </div>
 
-      {/* Title + right stats */}
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
         <div>
           <div style={{ fontSize: 24, fontWeight: 900, color: "#0f172a" }}>NFT Mix</div>
@@ -824,16 +704,11 @@ export default function NFTMix() {
           </div>
 
           <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75, lineHeight: 1.5 }}>
-            Bridges are now saved to <strong>S3</strong>, and lock state is saved in your <code>project_{projectId}</code>{" "}
-            blob — so it will survive refresh reliably.
+            Bridges/locks are saved in your <code>project_{projectId}</code> blob.
           </div>
 
           {loading ? <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>Loading Album → NFT Mix…</div> : null}
-          {loadErr ? (
-            <div style={{ marginTop: 8, ...errorBox() }}>
-              {loadErr}
-            </div>
-          ) : null}
+          {loadErr ? <div style={{ marginTop: 8, ...errorBox() }}>{loadErr}</div> : null}
         </div>
 
         <div style={{ display: "flex", gap: 16, fontSize: 12, opacity: 0.75, alignItems: "flex-end" }}>
@@ -846,7 +721,6 @@ export default function NFTMix() {
         </div>
       </div>
 
-      {/* Global player */}
       <div style={{ marginTop: 14, ...card() }}>
         <div style={sectionTitle()}>NFT Mix Player</div>
 
@@ -910,11 +784,10 @@ export default function NFTMix() {
         <audio ref={audioRef} />
       </div>
 
-      {/* Glue lines */}
       <div style={{ marginTop: 14, ...card() }}>
         <div style={sectionTitle()}>Glue / Bridge Lines</div>
         <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
-          Lock now persists across refresh. Upload is disabled when locked.
+          Upload + Master Save are disabled on static site. Locks still persist locally.
         </div>
 
         <div style={{ marginTop: 12, border: "1px solid #e5e7eb", borderRadius: 14, overflow: "hidden" }}>
@@ -963,18 +836,9 @@ export default function NFTMix() {
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                       <div style={plusPill()}>+</div>
 
-                      <label style={uploadBtn(line.locked)}>
+                      <label style={uploadBtn(true)} title="Disabled on static site">
                         Upload Bridge
-                        <input
-                          type="file"
-                          accept="audio/*"
-                          disabled={line.locked}
-                          style={{ display: "none" }}
-                          onChange={(e) => {
-                            handlePickBridge(idx, e.target.files?.[0] || null);
-                            e.target.value = "";
-                          }}
-                        />
+                        <input type="file" accept="audio/*" disabled style={{ display: "none" }} />
                       </label>
 
                       <div style={{ fontSize: 12, opacity: 0.75, minWidth: 220 }}>
@@ -983,7 +847,7 @@ export default function NFTMix() {
 
                       <button
                         type="button"
-                        title={bridgePlayable ? "Play/Pause bridge (global player)" : "Upload bridge first"}
+                        title={bridgePlayable ? "Play/Pause bridge (global player)" : "No playback URL"}
                         onClick={() => toggleBridgeRow(line.fromSlot, line.toSlot, bridgeUrl)}
                         style={tinyPlayBtn(bridgePlayable)}
                       >
@@ -1007,7 +871,7 @@ export default function NFTMix() {
 
                 {line.locked ? (
                   <div style={{ marginTop: 8, fontSize: 11, opacity: 0.7 }}>
-                    ✅ Locked: bridge upload disabled and will persist across refresh.
+                    ✅ Locked: will persist across refresh.
                   </div>
                 ) : null}
               </div>
@@ -1016,14 +880,10 @@ export default function NFTMix() {
         </div>
       </div>
 
-      {/* NFT MASTER SAVE */}
       <div style={{ marginTop: 14, ...card() }}>
         <div style={sectionTitle()}>Master Save</div>
-
         <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75, lineHeight: 1.6 }}>
-          Master Save snapshots your NFT Mix glue lines (bridges + locks) into S3 via the backend.
-          <br />
-          Two confirmations required.
+          Disabled on smartbridge2 static site. Use publisher/admin backend.
         </div>
 
         {msErr ? <div style={{ marginTop: 10, ...errorBox() }}>{msErr}</div> : null}
@@ -1043,8 +903,8 @@ export default function NFTMix() {
         ) : null}
 
         <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
-          <button type="button" onClick={handleMasterSave} disabled={msLoading} style={primaryBtn(msLoading)}>
-            {msLoading ? "Master Saving…" : "Master Save"}
+          <button type="button" onClick={handleMasterSave} disabled style={primaryBtn(true)}>
+            Master Save
           </button>
         </div>
       </div>
@@ -1055,8 +915,10 @@ export default function NFTMix() {
 /* ---------------- API ---------------- */
 
 async function fetchPlaybackUrl(API_BASE, s3Key) {
+  // Uses current file’s helper; base validation is done before calls
+  const base = requireApiBase(API_BASE);
   const qs = new URLSearchParams({ s3Key });
-  const r = await fetch(`${API_BASE}/api/playback-url?${qs.toString()}`);
+  const r = await fetch(`${base}/api/playback-url?${qs.toString()}`);
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j?.ok) return "";
   return String(j.url || "");
@@ -1105,19 +967,6 @@ function readJSON(key, fallback) {
   } catch {
     return fallback;
   }
-}
-
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    try {
-      const r = new FileReader();
-      r.onerror = () => reject(new Error("FileReader failed"));
-      r.onload = () => resolve(String(r.result || ""));
-      r.readAsDataURL(file);
-    } catch (e) {
-      reject(e);
-    }
-  });
 }
 
 function fmtTime(s) {

@@ -1,15 +1,19 @@
 // src/minisite/Meta.jsx
 import React, { useEffect, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
+import { API_BASE as API_BASE_ENV, requireApiBase } from "../lib/api/apiBase.js";
 
 const SONG_COUNT = 9;
+
+/* BUILD STAMP — MUST APPEAR IN UI */
+const META_BUILD_STAMP = "STAMP-META-FORCE-RENDER-2026-01-10-E";
 
 export default function Meta() {
   const { projectId } = useParams();
   const [searchParams] = useSearchParams();
   const token = searchParams.get("token") || "";
 
-  const API_BASE = String(import.meta.env.VITE_BACKEND_URL || "").replace(/\/+$/, "");
+  const API_BASE = String(API_BASE_ENV || "").replace(/\/+$/, "");
   const storageKey = (k) => `sb:${projectId || "no-project"}:meta:${k}`;
 
   const [loading, setLoading] = useState(false);
@@ -17,7 +21,9 @@ export default function Meta() {
   const [snapshot, setSnapshot] = useState(null);
 
   // ordered song slots (Album order) + titles (Album title fallback Catalog)
-  const [orderedSlots, setOrderedSlots] = useState(() => Array.from({ length: SONG_COUNT }).map((_, i) => i + 1));
+  const [orderedSlots, setOrderedSlots] = useState(() =>
+    Array.from({ length: SONG_COUNT }).map((_, i) => i + 1)
+  );
   const [titlesBySlot, setTitlesBySlot] = useState(() => ({})); // slot -> { title, titleJson }
 
   // meta per slot
@@ -37,8 +43,11 @@ export default function Meta() {
 
   useEffect(() => {
     if (!projectId) return;
-    if (!API_BASE) {
-      setLoadErr("Missing VITE_BACKEND_URL in .env.local");
+
+    try {
+      requireApiBase(API_BASE);
+    } catch (e) {
+      setLoadErr(e?.message || "Missing VITE_API_BASE (e.g. https://album-backend-kmuo.onrender.com)");
       return;
     }
 
@@ -196,10 +205,17 @@ export default function Meta() {
   };
 
   const handleMasterSave = async () => {
-    if (!API_BASE) return window.alert("Missing VITE_BACKEND_URL in .env.local");
     if (!projectId) return;
 
-    const first = window.confirm("Are you sure you want to perform a Master Save from Meta?\n\nThis saves credits + lyrics (song-level).");
+    try {
+      requireApiBase(API_BASE);
+    } catch (e) {
+      return window.alert(e?.message || "Missing VITE_API_BASE (e.g. https://album-backend-kmuo.onrender.com)");
+    }
+
+    const first = window.confirm(
+      "Are you sure you want to perform a Master Save from Meta?\n\nThis saves credits + lyrics (song-level)."
+    );
     if (!first) return;
 
     const second = window.confirm("Last chance.\n\nMake sure everything is complete before continuing.");
@@ -241,20 +257,19 @@ export default function Meta() {
   return (
     <div style={{ maxWidth: 1200 }}>
       {/* Small header */}
-<div style={{ fontSize: 11, opacity: 0.75, marginBottom: 10 }}>
-  Project ID: <code>{projectId}</code>
-  {token ? (
-    <>
-      {" · "}
-      Link: <code>{token.slice(0, 10)}…</code>
-    </>
-  ) : null}
-  {" · "}
-  <strong>Meta Build:</strong> <code>{META_BUILD_STAMP}</code>
-  {" · "}
-  <strong>App Build:</strong>{" "}
-  <code>{import.meta.env.VITE_APP_BUILD_STAMP || "NO_APP_STAMP_ENV"}</code>
-</div>
+      <div style={{ fontSize: 11, opacity: 0.75, marginBottom: 10 }}>
+        Project ID: <code>{projectId}</code>
+        {token ? (
+          <>
+            {" · "}
+            Link: <code>{token.slice(0, 10)}…</code>
+          </>
+        ) : null}
+        {" · "}
+        <strong>Meta Build:</strong> <code>{META_BUILD_STAMP}</code>
+        {" · "}
+        <strong>App Build:</strong> <code>{import.meta.env.VITE_APP_BUILD_STAMP || "NO_APP_STAMP_ENV"}</code>
+      </div>
 
       {/* Title */}
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-end" }}>
@@ -308,7 +323,16 @@ export default function Meta() {
               {/* Header */}
               <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 950, color: "#0f172a", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <div
+                    style={{
+                      fontSize: 14,
+                      fontWeight: 950,
+                      color: "#0f172a",
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
                     Song {slot} — {titlePack.title}
                   </div>
                   <div style={{ marginTop: 4, fontSize: 11, opacity: 0.65 }}>
@@ -583,7 +607,8 @@ function lyricsBox() {
     outline: "none",
     resize: "vertical",
     lineHeight: 1.5,
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+    fontFamily:
+      "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
   };
 }
 function primaryBtn() {
@@ -633,10 +658,9 @@ function slotBadge() {
     background: "#f8fafc",
     fontSize: 11,
     fontWeight: 900,
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+    fontFamily:
+      "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
     color: "#111827",
     whiteSpace: "nowrap",
   };
 }
-/* BUILD STAMP — MUST APPEAR IN UI */
-const META_BUILD_STAMP = "STAMP-META-FORCE-RENDER-2026-01-10-E";

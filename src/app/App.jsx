@@ -1,7 +1,6 @@
 // src/app/App.jsx
 import React from "react";
-import { Routes, Route, Navigate, Outlet, useParams } from "react-router-dom";
-import { ProjectMiniSiteProvider } from "../ProjectMiniSiteContext.jsx";
+import { Routes, Route, Navigate, Outlet } from "react-router-dom";
 
 // UI
 import SideNav from "../components/SideNav.jsx";
@@ -36,14 +35,13 @@ function AppShell() {
   );
 }
 
-// Wraps minisite pages with the provider using the URL projectId
+/**
+ * TEST STEP:
+ * Bypass ProjectMiniSiteProvider entirely to confirm it is not breaking minisite rendering.
+ * (If minisite starts showing content after this change, the provider is the culprit.)
+ */
 function MiniSiteProviderShell() {
-  const { projectId } = useParams();
-  return (
-    <ProjectMiniSiteProvider projectId={projectId}>
-      <Outlet />
-    </ProjectMiniSiteProvider>
-  );
+  return <Outlet />;
 }
 
 export default function App() {
@@ -64,7 +62,7 @@ export default function App() {
         <Route path="/admin" element={<Admin />} />
         <Route path="/export-tools" element={<ExportTools />} />
 
-        {/* Mini-site (provider only inside minisite) */}
+        {/* Mini-site */}
         <Route path="/minisite/:projectId" element={<MiniSiteProviderShell />}>
           <Route path="catalog" element={<Catalog />} />
           <Route path="album" element={<Album />} />

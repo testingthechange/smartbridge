@@ -6,15 +6,6 @@
 // - Persist only stable references (s3Key, fileName).
 // - Playback URLs must be resolved at runtime (e.g., via /api/playback-url?s3Key=...).
 
-export const DEFAULT_API_BASE = String(import.meta?.env?.VITE_API_BASE || "")
-  .trim()
-  .replace(/\/+$/, "");
-
-if (!DEFAULT_API_BASE) {
-  throw new Error("Missing VITE_API_BASE (e.g. https://album-backend-kmuo.onrender.com)");
-}
-
-export const MASTER_SAVE_ENDPOINT = `${DEFAULT_API_BASE}/api/master-save`;
 export const MAX_UPLOAD_MB = 25;
 
 export const VERSION_KEYS = [
@@ -22,6 +13,27 @@ export const VERSION_KEYS = [
   { key: "a", label: "A Version" },
   { key: "b", label: "B Version" },
 ];
+
+// Prefer Render env var, but NEVER crash at import-time.
+// Also support legacy VITE_BACKEND_URL.
+export function getApiBase() {
+  const raw =
+    String(import.meta?.env?.VITE_API_BASE || "").trim() ||
+    String(import.meta?.env?.VITE_BACKEND_URL || "").trim() ||
+    "";
+  return raw.replace(/\/+$/, "");
+}
+
+function requireApiBase(override = "") {
+  const base = String(override || getApiBase() || "").replace(/\/+$/, "");
+  if (!base) {
+    // No import-time throw; only throw when an API call is actually invoked.
+    throw new Error(
+      "Missing VITE_API_BASE (e.g. https://album-backend-kmuo.onrender.com)"
+    );
+  }
+  return base;
+}
 
 /* ---------------- storage helpers ---------------- */
 
@@ -129,7 +141,9 @@ void makeUploadKey;
  * Uploading is out-of-scope in this deployment and belongs to the publisher/admin backend.
  */
 export async function uploadSongFile() {
-  throw new Error("upload-to-s3 disabled on smartbridge2 (static site). Upload in publisher/admin backend.");
+  throw new Error(
+    "upload-to-s3 disabled on smartbridge2 (static site). Upload in publisher/admin backend."
+  );
 }
 
 /* ---------------- Playback URL ---------------- */
@@ -138,14 +152,17 @@ export async function uploadSongFile() {
  * Resolve a playable URL at runtime from a stable s3Key.
  * Backend MUST return a fresh playable url, not a stale persisted one.
  */
-export async function fetchPlaybackUrl({ apiBase = DEFAULT_API_BASE, s3Key }) {
-  const base = String(apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
+export async function fetchPlaybackUrl({ apiBase = "", s3Key }) {
+  const base = requireApiBase(apiBase);
   const key = String(s3Key || "").trim();
   if (!key) throw new Error("fetchPlaybackUrl: missing s3Key");
 
-  const res = await fetch(`${base}/api/playback-url?s3Key=${encodeURIComponent(key)}`);
+  const res = await fetch(
+    `${base}/api/playback-url?s3Key=${encodeURIComponent(key)}`
+  );
   const json = await res.json().catch(() => ({}));
-  if (!res.ok || json?.ok !== true) throw new Error(json?.error || `URL failed (${res.status})`);
+  if (!res.ok || json?.ok !== true)
+    throw new Error(json?.error || `URL failed (${res.status})`);
   return json?.url || "";
 }
 
@@ -277,8 +294,12 @@ export function projectForBackendFromSnapshot(snapshot) {
   return snapshot?.project || {};
 }
 
-export async function postMasterSave({ apiBase = DEFAULT_API_BASE, projectId, projectForBackend }) {
-  const base = String(apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
+export async function postMasterSave({
+  apiBase = "",
+  projectId,
+  projectForBackend,
+}) {
+  const base = requireApiBase(apiBase);
 
   const res = await fetch(`${base}/api/master-save`, {
     method: "POST",
@@ -290,6 +311,7 @@ export async function postMasterSave({ apiBase = DEFAULT_API_BASE, projectId, pr
   });
 
   const json = await res.json().catch(() => ({}));
-  if (!res.ok || json?.ok !== true) throw new Error(json?.error || `Master Save failed (${res.status})`);
+  if (!res.ok || json?.ok !== true)
+    throw new Error(json?.error || `Master Save failed (${res.status})`);
   return json;
 }

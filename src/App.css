@@ -15,7 +15,11 @@ import ExportTools from "../pages/ExportTools.jsx";
 
 // Mini-site
 import MiniSiteLayout from "../minisite/MiniSiteLayout.jsx";
-import Catalog from "../minisite/Catalog.jsx";
+
+// ✅ IMPORTANT: use the real Catalog under /minisite/catalog/
+import Catalog from "../minisite/catalog/Catalog.jsx";
+
+// (leave these as-is if they’re already the correct “real” minisite files)
 import Album from "../minisite/Album.jsx";
 import NFTMix from "../minisite/NFTMix.jsx";
 import Songs from "../minisite/Songs.jsx";

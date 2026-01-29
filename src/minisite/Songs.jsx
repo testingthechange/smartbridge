@@ -1,10 +1,10 @@
-// src/minisite/Songs.jsx
+// FILE: src/minisite/Songs.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { useSongsMasterSave } from "./songs/useSongsMasterSave";
 import { BridgePreviewPlayer, ABCTimelinePlayer } from "./songs/components/Players";
 import { loadProject, saveProject } from "./catalog/catalogCore.js";
-
+import { requireApiBase, API_BASE as API_BASE_ENV } from "../lib/api/apiBase.js";
 
 const SONG_COUNT = 9;
 const MASTER_SAVE_MIN_SHEETS = 8; // allow Master Save once 8/9 (or 9/9) worksheets are complete
@@ -15,7 +15,8 @@ export default function Songs() {
   const [searchParams] = useSearchParams();
   const token = searchParams.get("token") || "";
 
-  const API_BASE = String(import.meta.env.VITE_BACKEND_URL || "").replace(/\/+$/, "");
+  // Canonical env var: VITE_API_BASE (legacy VITE_BACKEND_URL supported in apiBase.js)
+  const API_BASE = String(API_BASE_ENV || "").replace(/\/+$/, "");
   const sk = (k) => `sb:${projectId || "no-project"}:songs:${k}`;
 
   const [loading, setLoading] = useState(false);
@@ -237,14 +238,18 @@ export default function Songs() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, currentFromSlot]);
 
-  /* ---------------- load catalog ---------------- */
+  /* ---------------- load catalog (A/B URLs per slot) ---------------- */
 
   const urlCacheRef = useRef(new Map());
 
   useEffect(() => {
     if (!projectId) return;
-    if (!API_BASE) {
-      setLoadErr("Missing VITE_BACKEND_URL in .env.local");
+
+    // Only error when we actually need backend (songs needs latest snapshot + playback URLs)
+    try {
+      requireApiBase(API_BASE);
+    } catch (e) {
+      setLoadErr(e?.message || "Missing VITE_API_BASE");
       return;
     }
 
@@ -255,7 +260,8 @@ export default function Songs() {
       setLoadErr("");
 
       try {
-        const r = await fetch(`${API_BASE}/api/master-save/latest/${projectId}`);
+        const base = requireApiBase(API_BASE);
+        const r = await fetch(`${base}/api/master-save/latest/${projectId}`);
         const j = await r.json().catch(() => ({}));
         if (!r.ok || !j?.ok) throw new Error(j?.error || `HTTP ${r.status}`);
         if (cancelled) return;
@@ -264,17 +270,28 @@ export default function Songs() {
         const catalogSongs = Array.isArray(project?.catalog?.songs) ? project.catalog.songs : [];
         const albumTitles = Array.isArray(project?.album?.songTitles) ? project.album.songTitles : [];
 
+        // Newer catalog uses slot-based local model; older snapshot may use locked catalog shapes.
+        // We support both:
+        // - preferred: project.catalog.songs[] with {slot,title,files:{a,b}}
+        // - legacy locked: project.locked.catalog.songs[] with {songNumber,title,versions:{A,B}}
+        const lockedSongs =
+          Array.isArray(j?.snapshot?.locked?.catalog?.songs) ? j.snapshot.locked.catalog.songs : [];
+
         const rows = Array.from({ length: SONG_COUNT }).map((_, idx) => {
           const slot = idx + 1;
+
           const aTitle = albumTitles.find((x) => Number(x.slot) === slot);
-          const cSong = catalogSongs.find((x) => Number(x.songNumber) === slot);
+          const cSong = catalogSongs.find((x) => Number(x?.slot) === slot);
+          const lSong = lockedSongs.find((x) => Number(x?.songNumber) === slot);
 
-          const title = String(aTitle?.title || cSong?.title || "").trim() || `Song ${slot}`;
+          const title =
+            String(aTitle?.title || cSong?.title || lSong?.title || "").trim() || `Song ${slot}`;
 
-          const aFileName = String(cSong?.versions?.A?.fileName || "").trim();
-          const aS3Key = String(cSong?.versions?.A?.s3Key || "").trim();
-          const bFileName = String(cSong?.versions?.B?.fileName || "").trim();
-          const bS3Key = String(cSong?.versions?.B?.s3Key || "").trim();
+          // Prefer slot model (files.a/files.b), fallback to locked versions A/B
+          const aFileName = String(cSong?.files?.a?.fileName || lSong?.versions?.A?.fileName || "").trim();
+          const aS3Key = String(cSong?.files?.a?.s3Key || lSong?.versions?.A?.s3Key || "").trim();
+          const bFileName = String(cSong?.files?.b?.fileName || lSong?.versions?.B?.fileName || "").trim();
+          const bS3Key = String(cSong?.files?.b?.s3Key || lSong?.versions?.B?.s3Key || "").trim();
 
           return {
             slot,
@@ -292,7 +309,7 @@ export default function Songs() {
               const cached = urlCacheRef.current.get(next.a.s3Key);
               if (cached) next.a.url = cached;
               else {
-                const u = await fetchPlaybackUrl(API_BASE, next.a.s3Key);
+                const u = await fetchPlaybackUrl({ apiBase: API_BASE, s3Key: next.a.s3Key });
                 next.a.url = u || "";
                 if (u) urlCacheRef.current.set(next.a.s3Key, u);
               }
@@ -302,7 +319,7 @@ export default function Songs() {
               const cached = urlCacheRef.current.get(next.b.s3Key);
               if (cached) next.b.url = cached;
               else {
-                const u = await fetchPlaybackUrl(API_BASE, next.b.s3Key);
+                const u = await fetchPlaybackUrl({ apiBase: API_BASE, s3Key: next.b.s3Key });
                 next.b.url = u || "";
                 if (u) urlCacheRef.current.set(next.b.s3Key, u);
               }
@@ -352,10 +369,10 @@ export default function Songs() {
     return pairKey(from, to);
   }, [currentFromSlot, activeToSlot]);
 
-  const activeConn = useMemo(() => currentWorksheetRows.find((r) => r.key === activePair) || null, [
-    currentWorksheetRows,
-    activePair,
-  ]);
+  const activeConn = useMemo(
+    () => currentWorksheetRows.find((r) => r.key === activePair) || null,
+    [currentWorksheetRows, activePair]
+  );
 
   // bridge player state (separate request vs pause)
   const [bridgeRequestPlayKey, setBridgeRequestPlayKey] = useState("");
@@ -530,7 +547,9 @@ export default function Songs() {
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div style={{ fontSize: 12, fontWeight: 900, textTransform: "uppercase", opacity: 0.75 }}>Master Save</div>
+            <div style={{ fontSize: 12, fontWeight: 900, textTransform: "uppercase", opacity: 0.75 }}>
+              Master Save
+            </div>
 
             {msStep === 1 ? (
               <>
@@ -567,7 +586,12 @@ export default function Songs() {
                   <button type="button" onClick={closeMasterSave} style={resetBtn()}>
                     Cancel
                   </button>
-                  <button type="button" onClick={confirmMasterSaveFinal} disabled={masterSaving} style={playBtn(!masterSaving)}>
+                  <button
+                    type="button"
+                    onClick={confirmMasterSaveFinal}
+                    disabled={masterSaving}
+                    style={playBtn(!masterSaving)}
+                  >
                     {masterSaving ? "Saving…" : "Yes — Master Save"}
                   </button>
                 </div>
@@ -750,6 +774,7 @@ export default function Songs() {
                   borderBottom: idx === currentWorksheetRows.length - 1 ? "none" : "1px solid #e5e7eb",
                   background: isActive ? "rgba(16,185,129,0.06)" : "#fff",
                   alignItems: "center",
+                  cursor: "pointer",
                 }}
                 onClick={() => setActiveToSlot(to)}
               >
@@ -758,102 +783,153 @@ export default function Songs() {
                   <div style={{ fontSize: 13, fontWeight: 950, color: "#0f172a", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                     Song {from} — {songTitle(from)}
                   </div>
-                  <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center", fontSize: 12, opacity: 0.8 }}>
-                    <span style={pill()}>A</span>
-                    <span style={{ fontSize: 12, opacity: 0.75 }}>From uses A in preview.</span>
+                  <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      style={playBtn(!!fromAUrl)}
+                      disabled={!fromAUrl}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setBridgeForcePauseKey(k);
+                        requestBridgePlay(from, to);
+                      }}
+                      title={!fromAUrl ? "Missing A audio URL for FROM" : "Play Bridge (preview) - use player above"}
+                    >
+                      Play Bridge
+                    </button>
                   </div>
                 </div>
 
                 {/* BRIDGE */}
-                <div style={{ display: "flex", justifyContent: "center" }}>
-                  <div style={{ display: "flex", gap: 10, alignItems: "center", width: "100%", maxWidth: 520 }}>
-                    <button
-                      type="button"
-                      disabled={!row.bridgeUrl}
-                      title={row.bridgeUrl ? "Play/Pause bridge in Bridge Preview player" : "Upload bridge first"}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (!row.bridgeUrl) return;
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.75 }}>
+                    {row.bridgeFileName ? row.bridgeFileName : "—"}
+                  </div>
 
-                        if (isThisActivePair && bridgeIsPlaying) {
-                          setBridgeForcePauseKey(k);
-                          setBridgeRequestPlayKey("");
-                          return;
-                        }
-
-                        setActiveToSlot(to);
-                        requestBridgePlay(from, to);
+                  <div style={{ marginTop: 8, display: "flex", justifyContent: "center", gap: 8, flexWrap: "wrap" }}>
+                    <label
+                      style={{
+                        padding: "8px 10px",
+                        borderRadius: 10,
+                        border: "1px solid #d1d5db",
+                        background: locked ? "#f3f4f6" : "#fff",
+                        color: locked ? "#6b7280" : "#111827",
+                        fontWeight: 900,
+                        cursor: locked ? "not-allowed" : "pointer",
                       }}
-                      style={circleBtn(!!row.bridgeUrl, isActive)}
+                      title={locked ? "Unlock to change bridge" : "Upload bridge audio (stored in browser)"}
+                      onClick={(e) => e.stopPropagation()}
                     >
-                      {isThisActivePair && bridgeIsPlaying ? "⏸" : "▶"}
-                    </button>
-
-                    <label style={uploadBtn(locked)} onClick={(e) => e.stopPropagation()}>
                       Upload
                       <input
                         type="file"
                         accept="audio/*"
-                        disabled={locked}
                         style={{ display: "none" }}
+                        disabled={locked}
                         onChange={(e) => {
                           const f = e.target.files?.[0] || null;
-                          handlePickBridge(from, to, f);
                           e.target.value = "";
+                          handlePickBridge(from, to, f);
                         }}
                       />
                     </label>
 
-                    <div style={{ minWidth: 0, flex: 1, fontSize: 12, opacity: 0.75, display: "flex", alignItems: "center", gap: 10 }}>
-                      <div style={{ minWidth: 0 }}>
-                        {row.bridgeFileName ? <code style={{ wordBreak: "break-word" }}>{row.bridgeFileName}</code> : "—"}
-                        {locked ? <span style={{ marginLeft: 10, fontSize: 11, fontWeight: 900, opacity: 0.6 }}>LOCKED</span> : null}
-                      </div>
-
-                      {showInlineEqForRow(k) ? <MiniEqPulse /> : null}
-                    </div>
+                    <button
+                      type="button"
+                      style={resetBtn()}
+                      disabled={!row.bridgeUrl}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!row.bridgeUrl) return;
+                        setBridgeForcePauseKey("");
+                        requestBridgePlay(from, to);
+                      }}
+                      title={!row.bridgeUrl ? "No bridge set" : "Request play for this pair"}
+                    >
+                      Preview
+                    </button>
                   </div>
                 </div>
 
                 {/* TO */}
-                <div style={{ minWidth: 0 }} onClick={(e) => e.stopPropagation()}>
+                <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 950, color: "#0f172a", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                     Song {to} — {songTitle(to)}
                   </div>
 
-                  <div style={{ marginTop: 8, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                    <label style={radioPill(choice === "A", !!toA && !locked)} title={toA ? "Use A" : "Missing A file"}>
-                      <input
-                        type="radio"
-                        name={`to-${k}`}
-                        checked={choice === "A"}
-                        onChange={() => setChoice(from, to, "A")}
-                        disabled={!toA || locked}
-                        style={{ marginRight: 6 }}
-                      />
-                      Listen to A
-                    </label>
+                  <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (locked) return;
+                        setChoice(from, to, "A");
+                      }}
+                      style={chip(choice === "A", locked)}
+                      title={locked ? "Locked" : "Choose A"}
+                    >
+                      Listen A
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (locked) return;
+                        setChoice(from, to, "B");
+                      }}
+                      style={chip(choice === "B", locked)}
+                      title={locked ? "Locked" : "Choose B"}
+                    >
+                      Listen B
+                    </button>
 
-                    <label style={radioPill(choice === "B", !!toB && !locked)} title={toB ? "Use B" : "Missing B file"}>
-                      <input
-                        type="radio"
-                        name={`to-${k}`}
-                        checked={choice === "B"}
-                        onChange={() => setChoice(from, to, "B")}
-                        disabled={!toB || locked}
-                        style={{ marginRight: 6 }}
-                      />
-                      Listen to B
-                    </label>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!listenUrl) return;
+                        // We don’t embed an extra audio element here; the ABCTimelinePlayer is the truth.
+                        // This button just focuses the active row.
+                        setActiveToSlot(to);
+                      }}
+                      style={resetBtn()}
+                      disabled={!listenUrl}
+                      title={!listenUrl ? "Missing selected To URL" : "Focus this row (player above uses selection)"}
+                    >
+                      Use
+                    </button>
 
-                    <MiniInlinePlayer url={listenUrl} disabled={!listenUrl} label={`To ${choice}`} />
+                    {showInlineEqForRow(k) ? (
+                      <span style={{ display: "inline-flex", gap: 2, alignItems: "flex-end", height: 12, marginLeft: 2 }}>
+                        <span style={eqBar()} className="sb-eq1" />
+                        <span style={eqBar()} className="sb-eq2" />
+                        <span style={eqBar()} className="sb-eq3" />
+                      </span>
+                    ) : null}
                   </div>
                 </div>
 
-                {/* DOME LOCK */}
-                <div style={{ justifySelf: "end" }} onClick={(e) => e.stopPropagation()}>
-                  <button type="button" onClick={() => toggleLock(from, to)} style={lockBtn(locked)}>
-                    {locked ? "Locked" : "Unlock"}
+                {/* DOME */}
+                <div style={{ textAlign: "right" }}>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleLock(from, to);
+                    }}
+                    style={{
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      border: locked ? "1px solid #111827" : "1px solid #d1d5db",
+                      background: locked ? "#111827" : "#fff",
+                      color: locked ? "#fff" : "#111827",
+                      fontWeight: 950,
+                      cursor: "pointer",
+                      width: "100%",
+                    }}
+                    title={locked ? "Unlock dome" : "Lock dome"}
+                  >
+                    {locked ? "Locked" : "Lock"}
                   </button>
                 </div>
               </div>
@@ -862,11 +938,11 @@ export default function Songs() {
         </div>
 
         {/* BOTTOM NAV */}
-        <div style={{ marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ marginTop: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <button type="button" onClick={goPrev} style={resetBtn()} disabled={currentFromSlot <= 1}>
             ◀ Prev
           </button>
-          <WorksheetNav />
+          <WorksheetNav compact />
           <button type="button" onClick={goNext} style={resetBtn()} disabled={currentFromSlot >= SONG_COUNT}>
             Next ▶
           </button>
@@ -874,361 +950,191 @@ export default function Songs() {
       </div>
     </div>
   );
-} // ✅ closes Songs() cleanly
-
-/* ---------------- tiny inline To preview ---------------- */
-
-function MiniInlinePlayer({ url, disabled, label }) {
-  const audioRef = useRef(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-
-  useEffect(() => {
-    setIsPlaying(false);
-    const el = audioRef.current;
-    if (!el) return;
-    try {
-      el.pause();
-      el.currentTime = 0;
-    } catch {}
-  }, [url]);
-
-  const toggle = async () => {
-    if (disabled) return;
-    const el = audioRef.current;
-    if (!el) return;
-
-    if (isPlaying) {
-      el.pause();
-      setIsPlaying(false);
-      return;
-    }
-
-    try {
-      await el.play();
-      setIsPlaying(true);
-    } catch {
-      setIsPlaying(false);
-    }
-  };
-
-  return (
-    <div style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-      <button type="button" onClick={toggle} disabled={disabled} style={tinyBtn(!disabled)} title={label}>
-        {isPlaying ? "Pause" : "Play"}
-      </button>
-      <audio ref={audioRef} src={url || undefined} onEnded={() => setIsPlaying(false)} />
-    </div>
-  );
 }
 
-function MiniEqPulse() {
-  return (
-    <div
-      title="Playing"
-      style={{
-        display: "inline-flex",
-        alignItems: "flex-end",
-        gap: 3,
-        padding: "2px 6px",
-        borderRadius: 999,
-        border: "1px solid rgba(16,185,129,0.35)",
-        background: "rgba(16,185,129,0.08)",
-      }}
-    >
-      <span style={eqBar(0)} />
-      <span style={eqBar(120)} />
-      <span style={eqBar(240)} />
-    </div>
-  );
+/* ---------------- backend helper ---------------- */
+
+async function fetchPlaybackUrl({ apiBase = "", s3Key }) {
+  const base = requireApiBase(apiBase);
+  const key = String(s3Key || "").trim();
+  if (!key) return "";
+  const res = await fetch(`${base}/api/playback-url?s3Key=${encodeURIComponent(key)}`);
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json?.ok !== true) return "";
+  return String(json?.url || "");
 }
 
-function eqBar(delayMs) {
-  return {
-    width: 4,
-    height: 12,
-    borderRadius: 3,
-    background: "rgba(16,185,129,0.95)",
-    display: "inline-block",
-    animation: `sbEqPulse 0.75s ease-in-out ${delayMs}ms infinite`,
-  };
-}
+/* ---------------- localStorage helpers ---------------- */
 
-function ensureEqKeyframes() {
-  if (typeof document === "undefined") return;
-  const id = "sb-eq-keyframes";
-  if (document.getElementById(id)) return;
-
-  const style = document.createElement("style");
-  style.id = id;
-  style.textContent = `
-@keyframes sbEqPulse {
-  0% { transform: scaleY(0.35); opacity: 0.55; }
-  50% { transform: scaleY(1.0); opacity: 1.0; }
-  100% { transform: scaleY(0.45); opacity: 0.65; }
-}
-`;
-  document.head.appendChild(style);
-}
-
-/* ---------------- API ---------------- */
-
-async function fetchPlaybackUrl(API_BASE, s3Key) {
+function readTextSafe(key, fallback = "") {
   try {
-    const qs = new URLSearchParams({ s3Key });
-    const r = await fetch(`${API_BASE}/api/playback-url?${qs.toString()}`);
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j?.ok) return "";
-    return String(j.url || "");
+    const v = localStorage.getItem(String(key));
+    return v == null ? fallback : String(v);
   } catch {
-    return "";
+    return fallback;
   }
 }
 
-/* ---------------- storage + helpers ---------------- */
-
-function readJSONSafe(key, fallback) {
+function writeTextSafe(key, value) {
   try {
-    const raw = localStorage.getItem(key);
+    localStorage.setItem(String(key), String(value));
+  } catch {}
+}
+
+function readJSONSafe(key, fallback = null) {
+  try {
+    const raw = localStorage.getItem(String(key));
     if (!raw) return fallback;
     return JSON.parse(raw);
   } catch {
     return fallback;
   }
 }
-function writeJSONSafe(key, obj) {
+
+function writeJSONSafe(key, value) {
   try {
-    localStorage.setItem(key, JSON.stringify(obj));
-  } catch {}
-}
-function readTextSafe(key, fallback) {
-  try {
-    const v = localStorage.getItem(key);
-    return v === null || v === undefined ? fallback : String(v);
-  } catch {
-    return fallback;
-  }
-}
-function writeTextSafe(key, val) {
-  try {
-    localStorage.setItem(key, String(val ?? ""));
+    localStorage.setItem(String(key), JSON.stringify(value ?? null));
   } catch {}
 }
 
-function safeRevoke(url) {
-  if (!url) return;
-  if (typeof url === "string" && url.startsWith("blob:")) {
-    try {
-      URL.revokeObjectURL(url);
-    } catch {}
-  }
-}
+/* ---------------- IndexedDB blob store (bridges) ---------------- */
 
-/**
- * Minimal IndexedDB blob store
- * DB: "sb_assets"  Store: "files"
- */
-function openDb() {
-  return new Promise((resolve, reject) => {
-    try {
-      const req = indexedDB.open("sb_assets", 1);
-      req.onupgradeneeded = () => {
-        const db = req.result;
-        if (!db.objectStoreNames.contains("files")) db.createObjectStore("files");
-      };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error || new Error("indexedDB open failed"));
-    } catch (e) {
-      reject(e);
-    }
-  });
-}
+const IDB_DB = "sb-bridges";
+const IDB_STORE = "blobs";
+const IDB_VERSION = 1;
 
-async function idbSetBlob(key, blob) {
-  const db = await openDb();
+function idbOpen() {
   return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction("files", "readwrite");
-      const store = tx.objectStore("files");
-      store.put(blob, key);
-      tx.oncomplete = () => {
-        try {
-          db.close();
-        } catch {}
-        resolve(true);
-      };
-      tx.onerror = () => {
-        try {
-          db.close();
-        } catch {}
-        reject(tx.error || new Error("indexedDB write failed"));
-      };
-    } catch (e) {
-      try {
-        db.close();
-      } catch {}
-      reject(e);
-    }
+    const req = indexedDB.open(IDB_DB, IDB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
   });
 }
 
 async function idbGetBlob(key) {
-  const db = await openDb();
-  return new Promise((resolve) => {
-    try {
-      const tx = db.transaction("files", "readonly");
-      const store = tx.objectStore("files");
-      const req = store.get(key);
-      req.onsuccess = () => {
-        try {
-          db.close();
-        } catch {}
-        resolve(req.result || null);
-      };
-      req.onerror = () => {
-        try {
-          db.close();
-        } catch {}
-        resolve(null);
-      };
-    } catch {
-      try {
-        db.close();
-      } catch {}
-      resolve(null);
-    }
+  try {
+    const db = await idbOpen();
+    return await new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.get(String(key));
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function idbSetBlob(key, blob) {
+  const db = await idbOpen();
+  return await new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    const store = tx.objectStore(IDB_STORE);
+    const req = store.put(blob, String(key));
+    req.onsuccess = () => resolve(true);
+    req.onerror = () => reject(req.error);
   });
 }
 
-/* ---------------- styles ---------------- */
+/* ---------------- style helpers ---------------- */
 
 function card() {
-  return { background: "#ffffff", border: "1px solid #e5e7eb", borderRadius: 12, padding: 16 };
-}
-
-function errorBox() {
   return {
-    fontSize: 12,
-    color: "#991b1b",
-    background: "#fee2e2",
-    border: "1px solid #fecaca",
-    padding: 10,
-    borderRadius: 12,
-    whiteSpace: "pre-wrap",
+    border: "1px solid #e5e7eb",
+    borderRadius: 14,
+    background: "#fff",
+    padding: 12,
   };
 }
 
 function sectionTitle() {
-  return { fontSize: 12, fontWeight: 900, letterSpacing: 0.2, textTransform: "uppercase" };
+  return { fontSize: 12, fontWeight: 900, textTransform: "uppercase", opacity: 0.7, letterSpacing: 0.2 };
 }
 
-function uploadBtn(locked) {
+function errorBox() {
   return {
-    display: "inline-block",
-    padding: "8px 12px",
-    borderRadius: 10,
-    background: locked ? "#e5e7eb" : "#d1fae5",
-    color: locked ? "#6b7280" : "#065f46",
-    fontSize: 12,
+    padding: 12,
+    borderRadius: 12,
+    border: "1px solid rgba(244,63,94,0.25)",
+    background: "rgba(244,63,94,0.08)",
+    color: "#9f1239",
     fontWeight: 900,
-    cursor: locked ? "not-allowed" : "pointer",
-    border: locked ? "1px solid #d1d5db" : "1px solid #a7f3d0",
-    whiteSpace: "nowrap",
+    whiteSpace: "pre-wrap",
   };
 }
 
-function lockBtn(locked) {
-  const base = { padding: "8px 10px", borderRadius: 10, fontSize: 12, fontWeight: 900, cursor: "pointer" };
-  if (!locked) return { ...base, border: "1px solid #a7f3d0", background: "#d1fae5", color: "#065f46" };
-  return { ...base, border: "1px solid #fecaca", background: "#fee2e2", color: "#991b1b" };
-}
-
-function playBtn(enabled) {
+function playBtn(enabled = true) {
   return {
-    padding: "8px 10px",
+    padding: "10px 12px",
     borderRadius: 10,
     border: "1px solid #111827",
     background: enabled ? "#111827" : "#e5e7eb",
-    color: enabled ? "#f9fafb" : "#6b7280",
-    fontSize: 12,
+    color: enabled ? "#fff" : "#6b7280",
     fontWeight: 900,
     cursor: enabled ? "pointer" : "not-allowed",
-    width: 110,
+    whiteSpace: "nowrap",
   };
 }
 
 function resetBtn() {
   return {
-    padding: "8px 10px",
+    padding: "10px 12px",
     borderRadius: 10,
     border: "1px solid #d1d5db",
     background: "#fff",
     color: "#111827",
-    fontSize: 12,
     fontWeight: 900,
     cursor: "pointer",
+    whiteSpace: "nowrap",
   };
 }
 
-function tinyBtn(enabled) {
+function chip(active, locked) {
   return {
-    padding: "6px 8px",
-    borderRadius: 10,
-    border: "1px solid #111827",
-    background: enabled ? "#111827" : "#e5e7eb",
-    color: enabled ? "#f9fafb" : "#6b7280",
-    fontSize: 11,
-    fontWeight: 900,
-    cursor: enabled ? "pointer" : "not-allowed",
-  };
-}
-
-function pill() {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
+    padding: "8px 10px",
     borderRadius: 999,
-    padding: "4px 10px",
-    border: "1px solid #e5e7eb",
-    background: "#fff",
-    fontSize: 12,
+    border: active ? "1px solid #111827" : "1px solid #d1d5db",
+    background: active ? "#111827" : "#fff",
+    color: active ? "#fff" : "#111827",
     fontWeight: 900,
-    opacity: 0.85,
+    cursor: locked ? "not-allowed" : "pointer",
+    opacity: locked ? 0.6 : 1,
   };
 }
 
-function radioPill(active, enabled) {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    padding: "6px 10px",
-    borderRadius: 999,
-    border: active ? "1px solid rgba(15,23,42,0.55)" : "1px solid #e5e7eb",
-    background: !enabled ? "#f3f4f6" : active ? "rgba(15,23,42,0.05)" : "#fff",
-    color: !enabled ? "#9ca3af" : "#111827",
-    fontSize: 12,
-    fontWeight: 900,
-    cursor: enabled ? "pointer" : "not-allowed",
-    opacity: enabled ? 1 : 0.7,
-    userSelect: "none",
-  };
+function safeRevoke(url) {
+  try {
+    if (url) URL.revokeObjectURL(url);
+  } catch {}
 }
 
-function circleBtn(enabled, activeRow) {
+function ensureEqKeyframes() {
+  const id = "sb-eq-keyframes";
+  if (document.getElementById(id)) return;
+  const style = document.createElement("style");
+  style.id = id;
+  style.textContent = `
+    @keyframes sbEq1 { 0%{transform:scaleY(.25)} 50%{transform:scaleY(1)} 100%{transform:scaleY(.35)} }
+    @keyframes sbEq2 { 0%{transform:scaleY(.65)} 50%{transform:scaleY(.25)} 100%{transform:scaleY(1)} }
+    @keyframes sbEq3 { 0%{transform:scaleY(.35)} 50%{transform:scaleY(.95)} 100%{transform:scaleY(.25)} }
+    .sb-eq1 { animation: sbEq1 700ms infinite ease-in-out; transform-origin: bottom; }
+    .sb-eq2 { animation: sbEq2 620ms infinite ease-in-out; transform-origin: bottom; }
+    .sb-eq3 { animation: sbEq3 760ms infinite ease-in-out; transform-origin: bottom; }
+  `;
+  document.head.appendChild(style);
+}
+
+function eqBar() {
   return {
-    width: 34,
-    height: 34,
-    borderRadius: 999,
-    border: activeRow ? "2px solid rgba(16,185,129,0.55)" : "1px solid #d1d5db",
-    background: enabled ? "#111827" : "#e5e7eb",
-    color: enabled ? "#f9fafb" : "#9ca3af",
-    fontSize: 12,
-    fontWeight: 900,
-    cursor: enabled ? "pointer" : "not-allowed",
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    flex: "0 0 auto",
+    display: "inline-block",
+    width: 3,
+    borderRadius: 2,
+    background: "#111827",
+    height: 8,
   };
 }
