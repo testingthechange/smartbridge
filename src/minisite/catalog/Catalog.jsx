@@ -10,6 +10,9 @@ import {
   projectForBackendFromSnapshot,
   postMasterSave,
   getApiBase,
+  uploadSongFile,
+  fetchPlaybackUrl,
+  MAX_UPLOAD_MB,
 } from "./catalogCore.js";
 
 function useQuery() {
@@ -20,8 +23,23 @@ function useQuery() {
 function ensureProject(project, projectId) {
   const base = project && typeof project === "object" ? project : {};
   const songsRaw = Array.isArray(base?.catalog?.songs) ? base.catalog.songs : [];
+
   const songs = songsRaw.length
-    ? songsRaw
+    ? songsRaw.map((s, idx) => {
+        const slot = Number(s?.slot ?? idx + 1);
+        const files = s?.files && typeof s.files === "object" ? s.files : {};
+        return {
+          ...emptySong(slot),
+          ...s,
+          slot,
+          title: String(s?.title || ""),
+          files: {
+            album: { fileName: "", s3Key: "", playbackUrl: "", ...(files.album || {}) },
+            a: { fileName: "", s3Key: "", playbackUrl: "", ...(files.a || {}) },
+            b: { fileName: "", s3Key: "", playbackUrl: "", ...(files.b || {}) },
+          },
+        };
+      })
     : Array.from({ length: 9 }, (_, i) => emptySong(i + 1));
 
   return {
@@ -45,20 +63,87 @@ export default function Catalog() {
   const [project, setProject] = useState(() =>
     ensureProject(loadProject(projectId), projectId)
   );
+
   const [confirmStep, setConfirmStep] = useState(0);
   const [status, setStatus] = useState("");
+
+  const [uploadingKey, setUploadingKey] = useState(""); // `${slot}:${vk}`
+  const [uploadErr, setUploadErr] = useState("");
 
   function updateSongTitle(slot, title) {
     setProject((prev) => {
       const next = ensureProject(prev, projectId);
       next.catalog.songs = next.catalog.songs.map((s) =>
-        Number(s.slot) === Number(slot)
-          ? { ...s, title: String(title || "") }
-          : s
+        Number(s.slot) === Number(slot) ? { ...s, title: String(title || "") } : s
       );
       saveProject(projectId, next);
       return next;
     });
+  }
+
+  async function onUpload(slot, versionKey, file) {
+    setUploadErr("");
+    if (!file) return;
+
+    const maxBytes = MAX_UPLOAD_MB * 1024 * 1024;
+    if (file.size > maxBytes) {
+      setUploadErr(`File too large. Max ${MAX_UPLOAD_MB}MB.`);
+      return;
+    }
+
+    const apiBase = getApiBase();
+    const key = `${slot}:${versionKey}`;
+    setUploadingKey(key);
+
+    try {
+      const up = await uploadSongFile({
+        apiBase,
+        projectId,
+        slot,
+        versionKey,
+        file,
+        token,
+      });
+
+      const s3Key = String(up?.s3Key || "");
+      const playbackUrl = s3Key
+        ? await fetchPlaybackUrl({ apiBase, s3Key, token })
+        : "";
+
+      setProject((prev) => {
+        const next = ensureProject(prev, projectId);
+        next.catalog.songs = next.catalog.songs.map((s) => {
+          if (Number(s.slot) !== Number(slot)) return s;
+
+          const files = s.files || {};
+          const existing = files[versionKey] || {
+            fileName: "",
+            s3Key: "",
+            playbackUrl: "",
+          };
+
+          return {
+            ...s,
+            files: {
+              ...files,
+              [versionKey]: {
+                ...existing,
+                fileName: file.name,
+                s3Key,
+                playbackUrl,
+              },
+            },
+          };
+        });
+
+        saveProject(projectId, next);
+        return next;
+      });
+    } catch (e) {
+      setUploadErr(e?.message || "Upload failed.");
+    } finally {
+      setUploadingKey("");
+    }
   }
 
   async function onMasterSave() {
@@ -99,6 +184,12 @@ export default function Catalog() {
     <div style={{ maxWidth: 1120, margin: "0 auto", padding: "16px 0" }}>
       <h2 style={{ marginTop: 10, marginBottom: 10 }}>Catalog</h2>
 
+      {uploadErr ? (
+        <div style={{ marginBottom: 10, color: "#ff4d4f", fontSize: 12 }}>
+          {uploadErr}
+        </div>
+      ) : null}
+
       <div
         style={{
           border: "1px solid rgba(0,0,0,0.15)",
@@ -111,28 +202,76 @@ export default function Catalog() {
           <div
             key={s.slot}
             style={{
-              display: "flex",
-              gap: 10,
-              alignItems: "center",
-              marginBottom: 8,
+              padding: "10px 0",
+              borderBottom: "1px solid rgba(0,0,0,0.08)",
             }}
           >
-            <div style={{ width: 44, opacity: 0.7 }}>#{s.slot}</div>
-            <input
-              value={s.title || ""}
-              onChange={(e) => updateSongTitle(s.slot, e.target.value)}
-              placeholder={`Song ${s.slot} title`}
-              style={{
-                flex: 1,
-                padding: "10px 12px",
-                borderRadius: 10,
-                border: "1px solid rgba(0,0,0,0.2)",
-              }}
-            />
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <div style={{ width: 44, opacity: 0.7 }}>#{s.slot}</div>
+              <input
+                value={s.title || ""}
+                onChange={(e) => updateSongTitle(s.slot, e.target.value)}
+                placeholder={`Song ${s.slot} title`}
+                style={{
+                  flex: 1,
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(0,0,0,0.2)",
+                }}
+              />
+            </div>
+
+            {/* Upload controls */}
+            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 10 }}>
+              {["album", "a", "b"].map((vk) => {
+                const isUploading = uploadingKey === `${s.slot}:${vk}`;
+                const f = (s.files && s.files[vk]) || {};
+                return (
+                  <div
+                    key={vk}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "6px 8px",
+                      borderRadius: 10,
+                      border: "1px solid rgba(0,0,0,0.12)",
+                      background: "rgba(255,255,255,0.03)",
+                    }}
+                  >
+                    <div style={{ width: 54, fontSize: 12, opacity: 0.75 }}>
+                      {vk.toUpperCase()}
+                    </div>
+
+                    <input
+                      type="file"
+                      accept="audio/*"
+                      disabled={isUploading}
+                      onChange={(e) => onUpload(s.slot, vk, e.target.files?.[0] || null)}
+                    />
+
+                    {isUploading ? (
+                      <span style={{ fontSize: 12, opacity: 0.8 }}>Uploading…</span>
+                    ) : null}
+
+                    {f.fileName ? (
+                      <span style={{ fontSize: 12, opacity: 0.75 }}>
+                        {String(f.fileName)}
+                      </span>
+                    ) : null}
+
+                    {f.playbackUrl ? (
+                      <audio controls src={String(f.playbackUrl)} style={{ height: 28 }} />
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         ))}
       </div>
 
+      {/* Master Save */}
       <div
         style={{
           marginTop: 14,
@@ -215,11 +354,6 @@ export default function Catalog() {
           Producer return received at {project.producerReturnReceivedAt}
         </div>
       ) : null}
-
-      {/* Keep token visible only during debugging; remove if you want */}
-      {/* <div style={{ marginTop: 8, fontSize: 11, opacity: 0.6 }}>
-        token present: {token ? "yes" : "no"}
-      </div> */}
     </div>
   );
 }
