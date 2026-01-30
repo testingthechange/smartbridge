@@ -237,7 +237,6 @@ export default function Catalog() {
     try {
       const apiBase = getApiBase();
 
-      // Refresh any version that has s3Key (always refresh, URLs can expire)
       const updates = [];
       for (const s of project.catalog.songs) {
         for (const vk of ["album", "a", "b"]) {
@@ -252,7 +251,7 @@ export default function Catalog() {
         return;
       }
 
-      const urlMap = new Map(); // key `${slot}:${vk}` -> url
+      const urlMap = new Map();
       for (const u of updates) {
         const url = await fetchPlaybackUrl({ apiBase, s3Key: u.s3Key, token });
         urlMap.set(`${u.slot}:${u.vk}`, String(url || ""));
@@ -319,22 +318,20 @@ export default function Catalog() {
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
         <h2 style={{ marginTop: 10, marginBottom: 10 }}>Catalog</h2>
 
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <button
-            onClick={refreshPlaybackUrls}
-            disabled={refreshing}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 10,
-              border: "1px solid rgba(0,0,0,0.2)",
-              background: "rgba(255,255,255,0.06)",
-              cursor: refreshing ? "not-allowed" : "pointer",
-              opacity: refreshing ? 0.6 : 1,
-            }}
-          >
-            {refreshing ? "Refreshing…" : "Refresh playback URLs"}
-          </button>
-        </div>
+        <button
+          onClick={refreshPlaybackUrls}
+          disabled={refreshing}
+          style={{
+            padding: "10px 12px",
+            borderRadius: 10,
+            border: "1px solid rgba(0,0,0,0.2)",
+            background: "rgba(255,255,255,0.06)",
+            cursor: refreshing ? "not-allowed" : "pointer",
+            opacity: refreshing ? 0.6 : 1,
+          }}
+        >
+          {refreshing ? "Refreshing…" : "Refresh playback URLs"}
+        </button>
       </div>
 
       {!canUpload ? (
@@ -405,7 +402,6 @@ export default function Catalog() {
               </button>
             </div>
 
-            {/* Version rows */}
             <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 10 }}>
               {["album", "a", "b"].map((vk) => {
                 const isUploading = uploadingKey === `${s.slot}:${vk}`;
@@ -464,7 +460,6 @@ export default function Catalog() {
                       </div>
                     </div>
 
-                    {/* Producer request fields (always available; main path on smartbridge2) */}
                     <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8, marginTop: 10 }}>
                       <input
                         value={req.requestedFileName || ""}
@@ -495,7 +490,6 @@ export default function Catalog() {
         ))}
       </div>
 
-      {/* Master Save */}
       <div
         style={{
           marginTop: 14,
@@ -568,7 +562,6 @@ export default function Catalog() {
         </div>
       ) : null}
 
-      {/* Bottom mini player */}
       <div
         style={{
           position: "fixed",
