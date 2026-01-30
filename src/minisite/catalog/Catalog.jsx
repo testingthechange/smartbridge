@@ -13,8 +13,8 @@ import {
   uploadSongFile,
   fetchPlaybackUrl,
   MAX_UPLOAD_MB,
+  uploadsEnabled,
 } from "./catalogCore.js";
-
 
 function useQuery() {
   const { search } = useLocation();
@@ -70,17 +70,24 @@ export default function Catalog() {
   const projectId = String(projectIdParam || "demo");
   const token = String(query.get("token") || "").trim();
 
-  const [project, setProject] = useState(() => ensureProject(loadProject(projectId), projectId));
+  const [project, setProject] = useState(() =>
+    ensureProject(loadProject(projectId), projectId)
+  );
 
   const [confirmStep, setConfirmStep] = useState(0);
   const [status, setStatus] = useState("");
 
-  const [uploadingKey, setUploadingKey] = useState(""); // `${slot}:${vk}`
+  const [uploadingKey, setUploadingKey] = useState("");
   const [uploadErr, setUploadErr] = useState("");
 
-  // Simple page-level player
+  // Bottom player
   const audioRef = useRef(null);
-  const [nowPlaying, setNowPlaying] = useState({ slot: null, version: "", title: "", url: "" });
+  const [nowPlaying, setNowPlaying] = useState({
+    slot: null,
+    version: "",
+    title: "",
+    url: "",
+  });
 
   function updateSongTitle(slot, title) {
     setProject((prev) => {
@@ -91,6 +98,29 @@ export default function Catalog() {
       saveProject(projectId, next);
       return next;
     });
+  }
+
+  function playSong(song, preferredVersion = "") {
+    const f = song?.files || {};
+    const url =
+      (preferredVersion && String(f?.[preferredVersion]?.playbackUrl || "")) ||
+      bestPlayableUrl(song);
+
+    if (!url) return;
+
+    const title = String(song?.title || `Song ${song?.slot || ""}`).trim();
+    setNowPlaying({
+      slot: Number(song?.slot || 0),
+      version: preferredVersion || "",
+      title,
+      url,
+    });
+
+    const el = audioRef.current;
+    if (el) {
+      el.src = url;
+      el.play().catch(() => {});
+    }
   }
 
   async function onUpload(slot, versionKey, file) {
@@ -118,7 +148,9 @@ export default function Catalog() {
       });
 
       const s3Key = String(up?.s3Key || "");
-      const playbackUrl = s3Key ? await fetchPlaybackUrl({ apiBase, s3Key, token }) : "";
+      const playbackUrl = s3Key
+        ? await fetchPlaybackUrl({ apiBase, s3Key, token })
+        : "";
 
       setProject((prev) => {
         const next = ensureProject(prev, projectId);
@@ -126,7 +158,11 @@ export default function Catalog() {
           if (Number(s.slot) !== Number(slot)) return s;
 
           const files = s.files || {};
-          const existing = files[versionKey] || { fileName: "", s3Key: "", playbackUrl: "" };
+          const existing = files[versionKey] || {
+            fileName: "",
+            s3Key: "",
+            playbackUrl: "",
+          };
 
           return {
             ...s,
@@ -149,28 +185,6 @@ export default function Catalog() {
       setUploadErr(e?.message || "Upload failed.");
     } finally {
       setUploadingKey("");
-    }
-  }
-
-  function playSong(song, preferredVersion = "") {
-    const f = song?.files || {};
-    const url =
-      (preferredVersion && String(f?.[preferredVersion]?.playbackUrl || "")) || bestPlayableUrl(song);
-
-    if (!url) return;
-
-    const title = String(song?.title || `Song ${song?.slot || ""}`).trim();
-    setNowPlaying({
-      slot: Number(song?.slot || 0),
-      version: preferredVersion || "",
-      title,
-      url,
-    });
-
-    const el = audioRef.current;
-    if (el) {
-      el.src = url;
-      el.play().catch(() => {});
     }
   }
 
@@ -208,8 +222,7 @@ export default function Catalog() {
     }
   }
 
-const canUpload = true;
-
+  const canUpload = uploadsEnabled();
 
   return (
     <div style={{ maxWidth: 1120, margin: "0 auto", padding: "16px 0 92px" }}>
@@ -232,7 +245,9 @@ const canUpload = true;
       ) : null}
 
       {uploadErr ? (
-        <div style={{ marginBottom: 10, color: "#ff4d4f", fontSize: 12 }}>{uploadErr}</div>
+        <div style={{ marginBottom: 10, color: "#ff4d4f", fontSize: 12 }}>
+          {uploadErr}
+        </div>
       ) : null}
 
       <div
@@ -253,6 +268,7 @@ const canUpload = true;
           >
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
               <div style={{ width: 44, opacity: 0.7 }}>#{s.slot}</div>
+
               <input
                 value={s.title || ""}
                 onChange={(e) => updateSongTitle(s.slot, e.target.value)}
@@ -264,6 +280,7 @@ const canUpload = true;
                   border: "1px solid rgba(0,0,0,0.2)",
                 }}
               />
+
               <button
                 onClick={() => playSong(s)}
                 disabled={!bestPlayableUrl(s)}
@@ -280,7 +297,6 @@ const canUpload = true;
               </button>
             </div>
 
-            {/* Upload controls */}
             <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 10 }}>
               {["album", "a", "b"].map((vk) => {
                 const isUploading = uploadingKey === `${s.slot}:${vk}`;
@@ -300,7 +316,9 @@ const canUpload = true;
                       background: "rgba(255,255,255,0.03)",
                     }}
                   >
-                    <div style={{ width: 54, fontSize: 12, opacity: 0.75 }}>{vk.toUpperCase()}</div>
+                    <div style={{ width: 54, fontSize: 12, opacity: 0.75 }}>
+                      {vk.toUpperCase()}
+                    </div>
 
                     <input
                       type="file"
@@ -309,10 +327,14 @@ const canUpload = true;
                       onChange={(e) => onUpload(s.slot, vk, e.target.files?.[0] || null)}
                     />
 
-                    {isUploading ? <span style={{ fontSize: 12, opacity: 0.8 }}>Uploading…</span> : null}
+                    {isUploading ? (
+                      <span style={{ fontSize: 12, opacity: 0.8 }}>Uploading…</span>
+                    ) : null}
 
                     {f.fileName ? (
-                      <span style={{ fontSize: 12, opacity: 0.75 }}>{String(f.fileName)}</span>
+                      <span style={{ fontSize: 12, opacity: 0.75 }}>
+                        {String(f.fileName)}
+                      </span>
                     ) : null}
 
                     {hasPlayable ? (
@@ -338,7 +360,6 @@ const canUpload = true;
         ))}
       </div>
 
-      {/* Master Save */}
       <div
         style={{
           marginTop: 14,
@@ -351,7 +372,9 @@ const canUpload = true;
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <div style={{ fontWeight: 700 }}>Master Save</div>
-            <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>Warning: finalizes Catalog snapshot.</div>
+            <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
+              Warning: finalizes Catalog snapshot.
+            </div>
             <div style={{ fontSize: 12, color: "#ff4d4f", marginTop: 6 }}>
               Use intentionally. This is treated as a finalized submission.
             </div>
@@ -400,7 +423,9 @@ const canUpload = true;
           )}
         </div>
 
-        {status ? <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>{status}</div> : null}
+        {status ? (
+          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>{status}</div>
+        ) : null}
       </div>
 
       {project.producerReturnReceived ? (
