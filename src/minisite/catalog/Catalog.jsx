@@ -1,5 +1,5 @@
 // FILE: src/minisite/catalog/Catalog.jsx
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
 
 import {
@@ -13,6 +13,7 @@ import {
   uploadSongFile,
   fetchPlaybackUrl,
   MAX_UPLOAD_MB,
+  uploadsEnabled,
 } from "./catalogCore.js";
 
 function useQuery() {
@@ -53,6 +54,15 @@ function ensureProject(project, projectId) {
   };
 }
 
+function bestPlayableUrl(song) {
+  const f = song?.files || {};
+  return (
+    String(f?.album?.playbackUrl || "") ||
+    String(f?.a?.playbackUrl || "") ||
+    String(f?.b?.playbackUrl || "")
+  );
+}
+
 export default function Catalog() {
   const { projectId: projectIdParam } = useParams();
   const query = useQuery();
@@ -60,15 +70,17 @@ export default function Catalog() {
   const projectId = String(projectIdParam || "demo");
   const token = String(query.get("token") || "").trim();
 
-  const [project, setProject] = useState(() =>
-    ensureProject(loadProject(projectId), projectId)
-  );
+  const [project, setProject] = useState(() => ensureProject(loadProject(projectId), projectId));
 
   const [confirmStep, setConfirmStep] = useState(0);
   const [status, setStatus] = useState("");
 
   const [uploadingKey, setUploadingKey] = useState(""); // `${slot}:${vk}`
   const [uploadErr, setUploadErr] = useState("");
+
+  // Simple page-level player
+  const audioRef = useRef(null);
+  const [nowPlaying, setNowPlaying] = useState({ slot: null, version: "", title: "", url: "" });
 
   function updateSongTitle(slot, title) {
     setProject((prev) => {
@@ -106,9 +118,7 @@ export default function Catalog() {
       });
 
       const s3Key = String(up?.s3Key || "");
-      const playbackUrl = s3Key
-        ? await fetchPlaybackUrl({ apiBase, s3Key, token })
-        : "";
+      const playbackUrl = s3Key ? await fetchPlaybackUrl({ apiBase, s3Key, token }) : "";
 
       setProject((prev) => {
         const next = ensureProject(prev, projectId);
@@ -116,11 +126,7 @@ export default function Catalog() {
           if (Number(s.slot) !== Number(slot)) return s;
 
           const files = s.files || {};
-          const existing = files[versionKey] || {
-            fileName: "",
-            s3Key: "",
-            playbackUrl: "",
-          };
+          const existing = files[versionKey] || { fileName: "", s3Key: "", playbackUrl: "" };
 
           return {
             ...s,
@@ -143,6 +149,28 @@ export default function Catalog() {
       setUploadErr(e?.message || "Upload failed.");
     } finally {
       setUploadingKey("");
+    }
+  }
+
+  function playSong(song, preferredVersion = "") {
+    const f = song?.files || {};
+    const url =
+      (preferredVersion && String(f?.[preferredVersion]?.playbackUrl || "")) || bestPlayableUrl(song);
+
+    if (!url) return;
+
+    const title = String(song?.title || `Song ${song?.slot || ""}`).trim();
+    setNowPlaying({
+      slot: Number(song?.slot || 0),
+      version: preferredVersion || "",
+      title,
+      url,
+    });
+
+    const el = audioRef.current;
+    if (el) {
+      el.src = url;
+      el.play().catch(() => {});
     }
   }
 
@@ -180,14 +208,30 @@ export default function Catalog() {
     }
   }
 
+  const canUpload = uploadsEnabled();
+
   return (
-    <div style={{ maxWidth: 1120, margin: "0 auto", padding: "16px 0" }}>
+    <div style={{ maxWidth: 1120, margin: "0 auto", padding: "16px 0 92px" }}>
       <h2 style={{ marginTop: 10, marginBottom: 10 }}>Catalog</h2>
 
-      {uploadErr ? (
-        <div style={{ marginBottom: 10, color: "#ff4d4f", fontSize: 12 }}>
-          {uploadErr}
+      {!canUpload ? (
+        <div
+          style={{
+            marginBottom: 12,
+            padding: 10,
+            borderRadius: 12,
+            border: "1px solid rgba(255,77,79,0.45)",
+            background: "rgba(255,77,79,0.10)",
+            fontSize: 12,
+          }}
+        >
+          Uploads are disabled on smartbridge2 (static site). Upload in publisher/admin backend.
+          This page can still preview existing playback URLs and submit Master Save.
         </div>
+      ) : null}
+
+      {uploadErr ? (
+        <div style={{ marginBottom: 10, color: "#ff4d4f", fontSize: 12 }}>{uploadErr}</div>
       ) : null}
 
       <div
@@ -219,6 +263,20 @@ export default function Catalog() {
                   border: "1px solid rgba(0,0,0,0.2)",
                 }}
               />
+              <button
+                onClick={() => playSong(s)}
+                disabled={!bestPlayableUrl(s)}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(0,0,0,0.2)",
+                  background: "rgba(255,255,255,0.06)",
+                  cursor: bestPlayableUrl(s) ? "pointer" : "not-allowed",
+                  opacity: bestPlayableUrl(s) ? 1 : 0.5,
+                }}
+              >
+                Play
+              </button>
             </div>
 
             {/* Upload controls */}
@@ -226,6 +284,8 @@ export default function Catalog() {
               {["album", "a", "b"].map((vk) => {
                 const isUploading = uploadingKey === `${s.slot}:${vk}`;
                 const f = (s.files && s.files[vk]) || {};
+                const hasPlayable = Boolean(f.playbackUrl);
+
                 return (
                   <div
                     key={vk}
@@ -239,29 +299,35 @@ export default function Catalog() {
                       background: "rgba(255,255,255,0.03)",
                     }}
                   >
-                    <div style={{ width: 54, fontSize: 12, opacity: 0.75 }}>
-                      {vk.toUpperCase()}
-                    </div>
+                    <div style={{ width: 54, fontSize: 12, opacity: 0.75 }}>{vk.toUpperCase()}</div>
 
                     <input
                       type="file"
                       accept="audio/*"
-                      disabled={isUploading}
+                      disabled={!canUpload || isUploading}
                       onChange={(e) => onUpload(s.slot, vk, e.target.files?.[0] || null)}
                     />
 
-                    {isUploading ? (
-                      <span style={{ fontSize: 12, opacity: 0.8 }}>Uploading…</span>
-                    ) : null}
+                    {isUploading ? <span style={{ fontSize: 12, opacity: 0.8 }}>Uploading…</span> : null}
 
                     {f.fileName ? (
-                      <span style={{ fontSize: 12, opacity: 0.75 }}>
-                        {String(f.fileName)}
-                      </span>
+                      <span style={{ fontSize: 12, opacity: 0.75 }}>{String(f.fileName)}</span>
                     ) : null}
 
-                    {f.playbackUrl ? (
-                      <audio controls src={String(f.playbackUrl)} style={{ height: 28 }} />
+                    {hasPlayable ? (
+                      <button
+                        onClick={() => playSong(s, vk)}
+                        style={{
+                          padding: "6px 8px",
+                          borderRadius: 10,
+                          border: "1px solid rgba(0,0,0,0.2)",
+                          background: "rgba(255,255,255,0.06)",
+                          cursor: "pointer",
+                          fontSize: 12,
+                        }}
+                      >
+                        Play {vk.toUpperCase()}
+                      </button>
                     ) : null}
                   </div>
                 );
@@ -281,19 +347,10 @@ export default function Catalog() {
           background: "rgba(255,255,255,0.02)",
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            gap: 12,
-            flexWrap: "wrap",
-          }}
-        >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <div style={{ fontWeight: 700 }}>Master Save</div>
-            <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
-              Warning: finalizes Catalog snapshot.
-            </div>
+            <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>Warning: finalizes Catalog snapshot.</div>
             <div style={{ fontSize: 12, color: "#ff4d4f", marginTop: 6 }}>
               Use intentionally. This is treated as a finalized submission.
             </div>
@@ -342,11 +399,7 @@ export default function Catalog() {
           )}
         </div>
 
-        {status ? (
-          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
-            {status}
-          </div>
-        ) : null}
+        {status ? <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>{status}</div> : null}
       </div>
 
       {project.producerReturnReceived ? (
@@ -354,6 +407,46 @@ export default function Catalog() {
           Producer return received at {project.producerReturnReceivedAt}
         </div>
       ) : null}
+
+      {/* Bottom mini player */}
+      <div
+        style={{
+          position: "fixed",
+          left: 0,
+          right: 0,
+          bottom: 0,
+          borderTop: "1px solid rgba(0,0,0,0.15)",
+          background: "rgba(16,24,36,0.92)",
+          backdropFilter: "blur(8px)",
+        }}
+      >
+        <div
+          style={{
+            maxWidth: 1120,
+            margin: "0 auto",
+            padding: "10px 16px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            flexWrap: "wrap",
+            color: "inherit",
+          }}
+        >
+          <div style={{ fontSize: 12, opacity: 0.85 }}>
+            {nowPlaying.url ? (
+              <>
+                Now Playing: <b>#{nowPlaying.slot}</b> {nowPlaying.title}
+                {nowPlaying.version ? ` (${String(nowPlaying.version).toUpperCase()})` : ""}
+              </>
+            ) : (
+              "Player: select Play on any song"
+            )}
+          </div>
+
+          <audio ref={audioRef} controls style={{ height: 34, minWidth: 280 }} />
+        </div>
+      </div>
     </div>
   );
 }
