@@ -13,16 +13,65 @@ import {
   postMasterSave,
 } from "./catalogCore.js";
 
+/**
+ * CRITICAL: normalize ALL song objects so older localStorage data
+ * (missing files.album/a/b etc.) never crashes the app on live.
+ */
+function normalizeSong(rawSong, slot) {
+  const seed = emptySong(slot);
+  const s = rawSong && typeof rawSong === "object" ? rawSong : {};
+
+  const rawFiles = s.files && typeof s.files === "object" ? s.files : {};
+  const seedFiles = seed.files || {};
+
+  const normalizeFileObj = (obj, fallback) => {
+    const o = obj && typeof obj === "object" ? obj : {};
+    return {
+      fileName: String(o.fileName || fallback.fileName || ""),
+      s3Key: String(o.s3Key || fallback.s3Key || ""),
+      playbackUrl: String(o.playbackUrl || fallback.playbackUrl || ""),
+    };
+  };
+
+  return {
+    ...seed,
+    ...s,
+    slot: Number(s.slot ?? slot),
+    title: String(s.title || ""),
+    titleJson:
+      s.titleJson && typeof s.titleJson === "object"
+        ? {
+            slot: Number(s.titleJson.slot ?? (s.slot ?? slot)),
+            title: String(s.titleJson.title ?? s.title ?? ""),
+            updatedAt: String(s.titleJson.updatedAt || ""),
+            source: String(s.titleJson.source || "catalog"),
+          }
+        : seed.titleJson,
+    files: {
+      album: normalizeFileObj(rawFiles.album, seedFiles.album),
+      a: normalizeFileObj(rawFiles.a, seedFiles.a),
+      b: normalizeFileObj(rawFiles.b, seedFiles.b),
+    },
+    uploadRequests:
+      s.uploadRequests && typeof s.uploadRequests === "object"
+        ? s.uploadRequests
+        : seed.uploadRequests,
+  };
+}
+
 function ensureProject(project, projectId) {
   const base = project && typeof project === "object" ? project : {};
   const songsRaw = Array.isArray(base?.catalog?.songs) ? base.catalog.songs : [];
-  const songs = songsRaw.length
-    ? songsRaw
-    : Array.from({ length: 9 }, (_, i) => emptySong(i + 1));
+
+  const songs = Array.from({ length: 9 }, (_, i) => {
+    const slot = i + 1;
+    const found = songsRaw.find((x) => Number(x?.slot) === slot) ?? songsRaw[i] ?? null;
+    return normalizeSong(found, slot);
+  });
 
   return {
     projectId: String(base.projectId || projectId),
-    catalog: { songs },
+    catalog: { ...(base.catalog || {}), songs },
     masterSave: base.masterSave || {},
     producerReturnReceived: Boolean(base.producerReturnReceived),
     producerReturnReceivedAt: String(base.producerReturnReceivedAt || ""),
@@ -45,15 +94,21 @@ export default function Catalog() {
   const token = qs.get("token") || "";
   const isAdmin = (qs.get("admin") || "").trim() === "1";
 
-  // CHANGE: token page is editable (producer working page)
   const isProducerView = Boolean(token) && !isAdmin;
 
-  // Read-only OFF for token view (producer must edit + master save)
+  // Producer token page is editable
   const readOnly = false;
 
-  const [project, setProject] = useState(() =>
-    ensureProject(loadProject(projectId), projectId)
-  );
+  const [project, setProject] = useState(() => ensureProject(loadProject(projectId), projectId));
+
+  // One-time self-heal: normalize + persist
+  useEffect(() => {
+    setProject((prev) => {
+      const healed = ensureProject(prev, projectId);
+      saveProject(projectId, healed);
+      return healed;
+    });
+  }, [projectId]);
 
   const audioRef = useRef(null);
 
@@ -70,7 +125,8 @@ export default function Catalog() {
   const [confirmStep, setConfirmStep] = useState(0);
   const [msStatus, setMsStatus] = useState("");
 
-  const canUpload = !window.location.hostname.includes("smartbridge2.onrender.com");
+  // LIVE: enable uploads (backend will enforce rules)
+  const canUpload = true;
 
   function persist(next) {
     saveProject(projectId, next);
@@ -82,7 +138,7 @@ export default function Catalog() {
     setProject((prev) => {
       const next = ensureProject(prev, projectId);
       next.catalog.songs = next.catalog.songs.map((s) =>
-        Number(s.slot) === Number(slot) ? updater(s) : s
+        Number(s.slot) === Number(slot) ? normalizeSong(updater(s), Number(slot)) : s
       );
       persist(next);
       return next;
@@ -164,6 +220,7 @@ export default function Catalog() {
     const key = `song_${slot}_${vk}`;
     setUploadingKey(key);
 
+    // Local preview immediately
     const localUrl = URL.createObjectURL(file);
     updateSong(slot, (x) => ({
       ...x,
@@ -297,22 +354,6 @@ export default function Catalog() {
 
       <audio ref={audioRef} />
 
-      {!canUpload && (
-        <div
-          style={{
-            color: "#b00020",
-            fontSize: 13,
-            marginBottom: 14,
-            background: "#fff3f3",
-            padding: 10,
-            borderRadius: 10,
-            border: "1px solid #f0b3b3",
-          }}
-        >
-          Upload-to-S3 disabled on smartbridge2 (static site). Upload in publisher/admin backend.
-        </div>
-      )}
-
       {uploadErr ? <div style={{ color: "red", fontSize: 12, marginBottom: 10 }}>{uploadErr}</div> : null}
 
       {project.catalog.songs.map((s) => (
@@ -347,6 +388,8 @@ export default function Catalog() {
               const key = `song_${s.slot}_${vk}`;
               const isUp = uploadingKey === key;
 
+              const inputId = `file_${projectId}_${s.slot}_${vk}`;
+
               return (
                 <div
                   key={vk}
@@ -359,11 +402,27 @@ export default function Catalog() {
                 >
                   <div style={{ fontWeight: 600, marginBottom: 6 }}>{vk.toUpperCase()}</div>
 
+                  {/* Hidden real input */}
                   <input
+                    id={inputId}
                     type="file"
-                    disabled={!canUpload || isUp}
+                    style={{ display: "none" }}
+                    disabled={isUp || readOnly}
                     onChange={(e) => onChooseFile(s.slot, vk, e.target.files?.[0] || null)}
                   />
+
+                  {/* Always-clickable trigger */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const el = document.getElementById(inputId);
+                      if (el && !el.disabled) el.click();
+                    }}
+                    disabled={isUp || readOnly}
+                    style={{ padding: "8px 10px" }}
+                  >
+                    Choose File
+                  </button>
 
                   <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
                     {f.fileName ? (
@@ -394,7 +453,6 @@ export default function Catalog() {
         </div>
       ))}
 
-      {/* Master Save available on token page AND admin page */}
       <div
         style={{
           border: "1px solid rgba(0,0,0,0.18)",
@@ -407,9 +465,7 @@ export default function Catalog() {
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <div style={{ fontWeight: 800 }}>Master Save</div>
-            <div style={{ fontSize: 12, opacity: 0.75 }}>
-              Finalizes Catalog snapshot for this project.
-            </div>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>Finalizes Catalog snapshot for this project.</div>
           </div>
 
           {confirmStep === 0 ? (
