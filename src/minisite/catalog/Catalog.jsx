@@ -1,9 +1,6 @@
 // FILE: src/minisite/catalog/Catalog.jsx
-// CANONICAL CATALOG PAGE
-// Do not duplicate. All routes must render this file.
-
-import React, { useEffect, useMemo, useState } from "react";
-import { useParams, useLocation, Navigate } from "react-router-dom";
+import React, { useMemo, useState } from "react";
+import { useLocation, useParams } from "react-router-dom";
 
 import {
   loadProject,
@@ -15,126 +12,65 @@ import {
   getApiBase,
 } from "./catalogCore.js";
 
-<div style={{position:"fixed",bottom:8,right:8,fontSize:11,opacity:.7}}>
-  CATALOG v2026-01-30 MASTER SAVE
-</div>
-
 function useQuery() {
   const { search } = useLocation();
   return useMemo(() => new URLSearchParams(search || ""), [search]);
 }
 
-function safeStr(v) {
-  return String(v ?? "").trim();
-}
-
-function ensureCatalogShape(project, projectId) {
+function ensureProject(project, projectId) {
   const base = project && typeof project === "object" ? project : {};
-  const p = {
-    projectId: safeStr(base.projectId || projectId),
-    title: safeStr(base.title || base.projectTitle || ""),
-    producerName: safeStr(base.producerName || base.assignedProducer || ""),
-    createdAt: safeStr(base.createdAt || ""),
-    updatedAt: safeStr(base.updatedAt || ""),
+  const songsRaw = Array.isArray(base?.catalog?.songs) ? base.catalog.songs : [];
+  const songs = songsRaw.length
+    ? songsRaw
+    : Array.from({ length: 9 }, (_, i) => emptySong(i + 1));
+
+  return {
+    projectId: String(base.projectId || projectId),
+    title: String(base.title || ""),
+    producerName: String(base.producerName || ""),
+    catalog: { ...(base.catalog || {}), songs },
+    masterSave: base.masterSave || {},
     producerReturnReceived: Boolean(base.producerReturnReceived),
-    producerReturnReceivedAt: safeStr(base.producerReturnReceivedAt || ""),
-    catalog: base.catalog && typeof base.catalog === "object" ? base.catalog : {},
-    masterSave:
-      base.masterSave && typeof base.masterSave === "object" ? base.masterSave : {},
+    producerReturnReceivedAt: String(base.producerReturnReceivedAt || ""),
   };
-
-  const songsRaw = Array.isArray(p.catalog.songs) ? p.catalog.songs : [];
-  // If empty, initialize 9 slots (or preserve existing count)
-  const count = songsRaw.length ? songsRaw.length : 9;
-  const songs = Array.from({ length: count }, (_, i) => {
-    const slot = i + 1;
-    const existing = songsRaw.find((s) => Number(s?.slot) === slot);
-    return existing && typeof existing === "object" ? existing : emptySong(slot);
-  });
-
-  p.catalog = { ...p.catalog, songs };
-  return p;
 }
 
 export default function Catalog() {
-  const { projectId: projectIdParam, page } = useParams();
+  const { projectId: projectIdParam } = useParams();
   const query = useQuery();
 
-  // Routes file uses /minisite/:projectId/:page. If someone hits wrong page, bounce.
-  if (page && page !== "catalog") {
-    return <Navigate to={`/minisite/${encodeURIComponent(projectIdParam || "demo")}/catalog`} replace />;
-  }
+  const projectId = String(projectIdParam || "demo");
+  const token = String(query.get("token") || "");
 
-  const projectId = safeStr(projectIdParam || "demo");
-  const token = safeStr(query.get("token") || ""); // informational; postMasterSave reads token too
-
-  const [project, setProject] = useState(() => ensureCatalogShape(loadProject(projectId), projectId));
-  const [status, setStatus] = useState({ kind: "idle", msg: "" }); // idle | saving | ok | err
-  const [confirmStep, setConfirmStep] = useState(0); // 0 none, 1 confirm armed
-  const [savingLocal, setSavingLocal] = useState(false);
-
-  // load on projectId change
-  useEffect(() => {
-    const loaded = ensureCatalogShape(loadProject(projectId), projectId);
-    setProject(loaded);
-    setStatus({ kind: "idle", msg: "" });
-    setConfirmStep(0);
-  }, [projectId]);
-
-  // lightweight autosave
-  useEffect(() => {
-    try {
-      setSavingLocal(true);
-      saveProject(projectId, project);
-    } finally {
-      const t = setTimeout(() => setSavingLocal(false), 150);
-      return () => clearTimeout(t);
-    }
-  }, [projectId, project]);
-
-  const isMagic = Boolean(token);
-  const linkStatusText = isMagic ? "magic-link session" : "login/unknown session";
+  const [project, setProject] = useState(() => ensureProject(loadProject(projectId), projectId));
+  const [confirmStep, setConfirmStep] = useState(0);
+  const [status, setStatus] = useState("");
 
   function updateSongTitle(slot, title) {
     setProject((prev) => {
-      const next = ensureCatalogShape(prev, projectId);
-      next.catalog = { ...(next.catalog || {}) };
-      next.catalog.songs = (next.catalog.songs || []).map((s) => {
-        if (Number(s?.slot) !== Number(slot)) return s;
-        return { ...s, title: String(title ?? "") };
-      });
-      next.updatedAt = new Date().toISOString();
+      const next = ensureProject(prev, projectId);
+      next.catalog.songs = next.catalog.songs.map((s) =>
+        Number(s.slot) === Number(slot) ? { ...s, title: String(title || "") } : s
+      );
+      saveProject(projectId, next);
       return next;
     });
   }
 
   async function onMasterSave() {
-    setStatus({ kind: "saving", msg: "Master saving…" });
-
+    setStatus("Master saving…");
     try {
       const apiBase = getApiBase();
-
-      // Build snapshot from current in-memory project state
       const snapshot = buildSnapshot({ projectId, project });
-
-      // Backend wants `project` payload (not the whole snapshot)
       const projectForBackend = projectForBackendFromSnapshot(snapshot);
 
-      // Token-aware: postMasterSave will attach Authorization if token exists (via URL or passed)
-      const res = await postMasterSave({
-        apiBase,
-        projectId,
-        projectForBackend,
-        token, // optional; safe to pass
-      });
+      await postMasterSave({ apiBase, projectId, projectForBackend, token });
 
-      // Mark producer return received (per your intended tracking)
       const now = new Date().toISOString();
       setProject((prev) => {
-        const next = ensureCatalogShape(prev, projectId);
+        const next = ensureProject(prev, projectId);
         next.producerReturnReceived = true;
         next.producerReturnReceivedAt = now;
-
         next.masterSave = {
           ...(next.masterSave || {}),
           lastMasterSaveAt: now,
@@ -143,168 +79,69 @@ export default function Catalog() {
             catalog: { complete: true, masterSavedAt: now },
           },
         };
-
-        // Keep any backend info (optional)
-        next.masterSave.backend = { ...(next.masterSave?.backend || {}), ...res };
-
-        next.updatedAt = now;
+        saveProject(projectId, next);
         return next;
       });
 
       setConfirmStep(0);
-      setStatus({ kind: "ok", msg: "Master Save complete." });
+      setStatus("Master Save complete.");
     } catch (e) {
-      setStatus({ kind: "err", msg: e?.message || "Master Save failed." });
       setConfirmStep(0);
+      setStatus(e?.message || "Master Save failed.");
     }
   }
 
-  const topRight = (
-    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-      <div style={{ fontSize: 12, opacity: 0.75 }}>{savingLocal ? "Saving…" : "Saved"}</div>
-    </div>
-  );
-
   return (
-    <div style={{ padding: 16, maxWidth: 1120, margin: "0 auto" }}>
-      {/* Small header required for magic-link minisite */}
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-        <div style={{ fontSize: 11, opacity: 0.7 }}>
-          <span style={{ marginRight: 10 }}>
-            <b>Project</b>: {projectId}
-          </span>
-          {project.title ? (
-            <span style={{ marginRight: 10 }}>
-              <b>Title</b>: {project.title}
-            </span>
-          ) : null}
-          {project.producerName ? (
-            <span style={{ marginRight: 10 }}>
-              <b>Producer</b>: {project.producerName}
-            </span>
-          ) : null}
-          <span style={{ marginRight: 10 }}>
-            <b>Session</b>: {linkStatusText}
-          </span>
-        </div>
-        {topRight}
+    <div>
+      <div style={{ border: "2px solid blue", padding: 10, marginBottom: 12 }}>
+        CATALOG IS RENDERING — projectId={projectId} token={token ? "yes" : "no"}
       </div>
 
-      <h2 style={{ marginTop: 14, marginBottom: 6 }}>Catalog</h2>
-      <div style={{ fontSize: 13, opacity: 0.8, marginBottom: 14 }}>
-        Edit song titles here. Files/versions are handled elsewhere; Catalog Master Save locks this section.
-      </div>
+      <h2>Catalog</h2>
 
-      {/* Song titles */}
-      <div style={{ border: "1px solid rgba(255,255,255,0.12)", borderRadius: 12, padding: 12 }}>
-        {project.catalog?.songs?.map((s) => (
-          <div
-            key={s.slot}
-            style={{
-              display: "flex",
-              gap: 10,
-              alignItems: "center",
-              padding: "8px 0",
-              borderBottom: "1px solid rgba(255,255,255,0.08)",
-            }}
-          >
-            <div style={{ width: 44, opacity: 0.75 }}>#{s.slot}</div>
+      <div style={{ border: "1px solid rgba(0,0,0,0.2)", borderRadius: 10, padding: 12 }}>
+        {project.catalog.songs.map((s) => (
+          <div key={s.slot} style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 8 }}>
+            <div style={{ width: 40, opacity: 0.7 }}>#{s.slot}</div>
             <input
               value={s.title || ""}
               onChange={(e) => updateSongTitle(s.slot, e.target.value)}
               placeholder={`Song ${s.slot} title`}
-              style={{
-                flex: 1,
-                padding: "10px 12px",
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.14)",
-                background: "rgba(255,255,255,0.04)",
-                color: "inherit",
-                outline: "none",
-              }}
+              style={{ flex: 1, padding: "8px 10px" }}
             />
           </div>
         ))}
       </div>
 
-      {/* Master Save */}
-      <div style={{ marginTop: 16, border: "1px solid rgba(255,255,255,0.12)", borderRadius: 12, padding: 12 }}>
+      <div style={{ marginTop: 14, border: "1px solid rgba(0,0,0,0.2)", borderRadius: 10, padding: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <div style={{ fontWeight: 700 }}>Master Save</div>
             <div style={{ fontSize: 12, opacity: 0.75 }}>
-              Finalizes Catalog in the project snapshot. Use intentionally.
+              Warning: finalizes Catalog snapshot.
             </div>
           </div>
 
           {confirmStep === 0 ? (
-            <button
-              onClick={() => setConfirmStep(1)}
-              style={{
-                padding: "10px 12px",
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.14)",
-                background: "rgba(255,255,255,0.06)",
-                color: "inherit",
-                cursor: "pointer",
-              }}
-            >
-              Master Save…
-            </button>
+            <button onClick={() => setConfirmStep(1)}>Master Save…</button>
           ) : (
             <div style={{ display: "flex", gap: 10 }}>
-              <button
-                onClick={() => setConfirmStep(0)}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "1px solid rgba(255,255,255,0.14)",
-                  background: "rgba(255,255,255,0.06)",
-                  color: "inherit",
-                  cursor: "pointer",
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={onMasterSave}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "1px solid rgba(255, 77, 79, 0.35)",
-                  background: "rgba(255, 77, 79, 0.14)",
-                  color: "inherit",
-                  cursor: "pointer",
-                }}
-              >
+              <button onClick={() => setConfirmStep(0)}>Cancel</button>
+              <button onClick={onMasterSave} style={{ border: "1px solid red" }}>
                 Confirm Master Save
               </button>
             </div>
           )}
         </div>
 
-        {/* red lettering warning is appropriate here */}
-        <div style={{ marginTop: 8, color: "#ff4d4f", fontSize: 12, lineHeight: 1.35 }}>
-          Warning: Master Save is treated as a finalized submission. Only run this when ready.
-        </div>
-
-        {/* status */}
-        {status.kind !== "idle" ? (
-          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.85 }}>
-            {status.kind === "saving" ? "Working…" : null}
-            {status.kind === "ok" ? "✅ " : null}
-            {status.kind === "err" ? "❌ " : null}
-            {status.msg}
-          </div>
-        ) : null}
-
-        {/* optional: show producer return status */}
-        {project.producerReturnReceived ? (
-          <div style={{ marginTop: 10, fontSize: 12, color: "rgba(68, 209, 138, 0.95)" }}>
-            Producer return received{project.producerReturnReceivedAt ? ` at ${project.producerReturnReceivedAt}` : ""}.
-          </div>
-        ) : null}
+        {status ? <div style={{ marginTop: 10, fontSize: 12 }}>{status}</div> : null}
       </div>
+
+      {project.producerReturnReceived ? (
+        <div style={{ marginTop: 10, fontSize: 12, color: "green" }}>
+          Producer return received at {project.producerReturnReceivedAt}
+        </div>
+      ) : null}
     </div>
   );
 }
