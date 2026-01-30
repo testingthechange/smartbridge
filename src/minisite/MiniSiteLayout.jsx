@@ -21,8 +21,6 @@ export default function MiniSiteLayout() {
 
   const token = String(searchParams.get("token") || "").trim();
   const isAdmin = String(searchParams.get("admin") || "").trim() === "1";
-
-  // Producer view = token present AND not admin preview
   const isProducerView = Boolean(token) && !isAdmin;
 
   const pid = String(projectIdParam || "demo");
@@ -44,23 +42,22 @@ export default function MiniSiteLayout() {
 
   return (
     <ProjectMiniSiteProvider projectId={pid}>
-      <div style={{ minHeight: "100vh" }}>
-        {/* Producer-safe small header; no internal/admin nav in producer view */}
+      <div style={{ minHeight: "100vh", background: "#ffffff", color: "#111" }}>
+        {/* LIGHT HEADER (no black bar) */}
         <div
           style={{
-            borderBottom: "1px solid rgba(255,255,255,0.10)",
-            background: "rgba(16,24,36,0.85)",
+            borderBottom: "1px solid rgba(0,0,0,0.12)",
+            background: "#ffffff",
             position: "sticky",
             top: 0,
             zIndex: 10,
-            backdropFilter: "blur(8px)",
           }}
         >
           <div
             style={{
               maxWidth: 1120,
               margin: "0 auto",
-              padding: "10px 16px",
+              padding: "12px 16px",
               display: "flex",
               justifyContent: "space-between",
               alignItems: "center",
@@ -68,19 +65,24 @@ export default function MiniSiteLayout() {
               flexWrap: "wrap",
             }}
           >
-            <div style={{ fontSize: 11, opacity: 0.7 }}>
-              Project: <b>{pid}</b>
-              {!isProducerView ? (
-                <>
-                  {" "}
-                  • Token:{" "}
-                  <span style={{ fontFamily: "monospace" }}>{token || "—"}</span>{" "}
-                  {isAdmin ? <span style={{ marginLeft: 8 }}>(admin)</span> : null}
-                </>
-              ) : null}
+            {/* TITLE + small project line */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <div style={{ fontWeight: 800, letterSpacing: 0.2 }}>
+                EXECUTIVE PRODUCTION SUITE
+              </div>
+              <div style={{ fontSize: 11, opacity: 0.75 }}>
+                Project: <b>{pid}</b>
+                {!isProducerView ? (
+                  <>
+                    {" "}
+                    • Token: <span style={{ fontFamily: "monospace" }}>{token || "—"}</span>{" "}
+                    {isAdmin ? <span style={{ marginLeft: 8 }}>(admin)</span> : null}
+                  </>
+                ) : null}
+              </div>
             </div>
 
-            {/* Minisite tabs (safe for producer view) */}
+            {/* Tabs */}
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
               {tabs.map((t) => {
                 const active = t.key === p;
@@ -89,15 +91,14 @@ export default function MiniSiteLayout() {
                     key={t.key}
                     to={`/minisite/${encodeURIComponent(pid)}/${t.key}${search}`}
                     style={{
-                      padding: "8px 10px",
-                      borderRadius: 10,
-                      border: active
-                        ? "1px solid rgba(90,167,255,0.35)"
-                        : "1px solid rgba(255,255,255,0.12)",
-                      background: active ? "rgba(90,167,255,0.16)" : "rgba(255,255,255,0.05)",
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: active ? "1px solid rgba(26,115,232,0.45)" : "1px solid rgba(0,0,0,0.18)",
+                      background: active ? "rgba(26,115,232,0.10)" : "#ffffff",
                       textDecoration: "none",
-                      color: "inherit",
+                      color: "#111",
                       fontSize: 13,
+                      fontWeight: active ? 700 : 600,
                     }}
                   >
                     {t.label}
