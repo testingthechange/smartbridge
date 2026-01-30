@@ -40,9 +40,11 @@ export default function Catalog() {
   const query = useQuery();
 
   const projectId = String(projectIdParam || "demo");
-  const token = String(query.get("token") || "");
+  const token = String(query.get("token") || "").trim();
 
-  const [project, setProject] = useState(() => ensureProject(loadProject(projectId), projectId));
+  const [project, setProject] = useState(() =>
+    ensureProject(loadProject(projectId), projectId)
+  );
   const [confirmStep, setConfirmStep] = useState(0);
   const [status, setStatus] = useState("");
 
@@ -50,7 +52,9 @@ export default function Catalog() {
     setProject((prev) => {
       const next = ensureProject(prev, projectId);
       next.catalog.songs = next.catalog.songs.map((s) =>
-        Number(s.slot) === Number(slot) ? { ...s, title: String(title || "") } : s
+        Number(s.slot) === Number(slot)
+          ? { ...s, title: String(title || "") }
+          : s
       );
       saveProject(projectId, next);
       return next;
@@ -92,56 +96,130 @@ export default function Catalog() {
   }
 
   return (
-    <div>
-      <div style={{ border: "2px solid blue", padding: 10, marginBottom: 12 }}>
-        CATALOG IS RENDERING — projectId={projectId} token={token ? "yes" : "no"}
-      </div>
+    <div style={{ maxWidth: 1120, margin: "0 auto", padding: "16px 0" }}>
+      <h2 style={{ marginTop: 10, marginBottom: 10 }}>Catalog</h2>
 
-      <h2>Catalog</h2>
-
-      <div style={{ border: "1px solid rgba(0,0,0,0.2)", borderRadius: 10, padding: 12 }}>
+      <div
+        style={{
+          border: "1px solid rgba(0,0,0,0.15)",
+          borderRadius: 12,
+          padding: 12,
+          background: "rgba(255,255,255,0.02)",
+        }}
+      >
         {project.catalog.songs.map((s) => (
-          <div key={s.slot} style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 8 }}>
-            <div style={{ width: 40, opacity: 0.7 }}>#{s.slot}</div>
+          <div
+            key={s.slot}
+            style={{
+              display: "flex",
+              gap: 10,
+              alignItems: "center",
+              marginBottom: 8,
+            }}
+          >
+            <div style={{ width: 44, opacity: 0.7 }}>#{s.slot}</div>
             <input
               value={s.title || ""}
               onChange={(e) => updateSongTitle(s.slot, e.target.value)}
               placeholder={`Song ${s.slot} title`}
-              style={{ flex: 1, padding: "8px 10px" }}
+              style={{
+                flex: 1,
+                padding: "10px 12px",
+                borderRadius: 10,
+                border: "1px solid rgba(0,0,0,0.2)",
+              }}
             />
           </div>
         ))}
       </div>
 
-      <div style={{ marginTop: 14, border: "1px solid rgba(0,0,0,0.2)", borderRadius: 10, padding: 12 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+      <div
+        style={{
+          marginTop: 14,
+          border: "1px solid rgba(0,0,0,0.15)",
+          borderRadius: 12,
+          padding: 12,
+          background: "rgba(255,255,255,0.02)",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
           <div>
             <div style={{ fontWeight: 700 }}>Master Save</div>
-            <div style={{ fontSize: 12, opacity: 0.75 }}>
+            <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
               Warning: finalizes Catalog snapshot.
+            </div>
+            <div style={{ fontSize: 12, color: "#ff4d4f", marginTop: 6 }}>
+              Use intentionally. This is treated as a finalized submission.
             </div>
           </div>
 
           {confirmStep === 0 ? (
-            <button onClick={() => setConfirmStep(1)}>Master Save…</button>
+            <button
+              onClick={() => setConfirmStep(1)}
+              style={{
+                padding: "10px 12px",
+                borderRadius: 10,
+                border: "1px solid rgba(0,0,0,0.2)",
+                background: "rgba(255,255,255,0.06)",
+                cursor: "pointer",
+              }}
+            >
+              Master Save…
+            </button>
           ) : (
             <div style={{ display: "flex", gap: 10 }}>
-              <button onClick={() => setConfirmStep(0)}>Cancel</button>
-              <button onClick={onMasterSave} style={{ border: "1px solid red" }}>
+              <button
+                onClick={() => setConfirmStep(0)}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(0,0,0,0.2)",
+                  background: "rgba(255,255,255,0.06)",
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={onMasterSave}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,77,79,0.6)",
+                  background: "rgba(255,77,79,0.14)",
+                  cursor: "pointer",
+                }}
+              >
                 Confirm Master Save
               </button>
             </div>
           )}
         </div>
 
-        {status ? <div style={{ marginTop: 10, fontSize: 12 }}>{status}</div> : null}
+        {status ? (
+          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
+            {status}
+          </div>
+        ) : null}
       </div>
 
       {project.producerReturnReceived ? (
-        <div style={{ marginTop: 10, fontSize: 12, color: "green" }}>
+        <div style={{ marginTop: 10, fontSize: 12, color: "#44d18a" }}>
           Producer return received at {project.producerReturnReceivedAt}
         </div>
       ) : null}
+
+      {/* Keep token visible only during debugging; remove if you want */}
+      {/* <div style={{ marginTop: 8, fontSize: 11, opacity: 0.6 }}>
+        token present: {token ? "yes" : "no"}
+      </div> */}
     </div>
   );
 }
