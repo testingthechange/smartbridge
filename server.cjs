@@ -8,15 +8,13 @@ const { Pool } = require("pg");
 const multer = require("multer");
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Storage helpers (R2 / JSON)
+// Storage helpers
 const { saveFileToR2, putJson, getJson } = require("./storage.cjs");
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 // ---------- CORS ----------
-// NOTE: If frontend and backend are on the same host, CORS is mostly irrelevant,
-// but keeping permissive allowed origins helps local dev + multi-service setups.
 const ALLOWED_ORIGINS = [
   "https://smartbridge2.onrender.com",
   "https://blackout-web.onrender.com",
@@ -27,7 +25,6 @@ const ALLOWED_ORIGINS = [
 app.use(
   cors({
     origin: (origin, cb) => {
-      // allow curl/server-to-server/no-origin
       if (!origin) return cb(null, true);
       if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
       return cb(new Error(`CORS blocked origin: ${origin}`), false);
@@ -42,7 +39,6 @@ app.use(express.json({ limit: "25mb" }));
 // ---------- DATABASE ----------
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // Render PG URLs typically require SSL
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : undefined,
 });
 
@@ -131,7 +127,7 @@ app.get("/api/projects/:projectId/meta", async (req, res) => {
   }
 });
 
-// ---------- MP3 UPLOAD (R2) ----------
+// ---------- MP3 UPLOAD ----------
 app.post("/api/projects/:projectId/songs/:songId/upload", upload.single("file"), async (req, res) => {
   const { projectId, songId } = req.params;
 
@@ -150,7 +146,7 @@ app.post("/api/projects/:projectId/songs/:songId/upload", upload.single("file"),
 
     res.json({ ok: true, url });
   } catch (err) {
-    console.error("R2 upload failed", err);
+    console.error("upload failed", err);
     res.status(500).json({ ok: false, error: "UPLOAD_FAILED" });
   }
 });
@@ -166,7 +162,6 @@ app.post("/api/master-save", async (req, res) => {
     const now = new Date().toISOString();
     const ts = now.replace(/[:.]/g, "-");
 
-    // NOTE: keep your established storage path
     const snapshotKey = `storage/projects/${projectId}/producer_returns/snapshots/${ts}.json`;
     const latestKey = `storage/projects/${projectId}/producer_returns/latest.json`;
 
@@ -174,7 +169,7 @@ app.post("/api/master-save", async (req, res) => {
       projectId,
       createdAt: now,
       source: "minisite-master-save",
-      project, // IMPORTANT: store as {project} so readers can do snapshot.project
+      project,
     });
 
     await putJson(latestKey, {
@@ -207,7 +202,6 @@ app.get("/api/master-save/latest/:projectId", async (req, res) => {
 
     const snapshot = await getJson(snapKey);
 
-    // normalize to { ok, snapshot: { project, savedAt } } shape used by frontend
     const project = snapshot?.project || snapshot?.data || snapshot?.project?.data || null;
     const savedAt = snapshot?.createdAt || latest?.lastMasterSaveAt || null;
 
@@ -240,13 +234,11 @@ app.post("/api/publish-minisite", (req, res) => {
 // ---------- STATIC FRONTEND (SPA) ----------
 const distDir = path.join(__dirname, "dist");
 
-// Serve built assets
 app.use(
   express.static(distDir, {
     etag: true,
     maxAge: "1y",
     setHeaders: (res, filePath) => {
-      // Never cache index.html
       if (filePath.endsWith("index.html")) {
         res.setHeader("Cache-Control", "no-store");
       }
@@ -255,8 +247,8 @@ app.use(
 );
 
 // SPA fallback (must be LAST)
-app.get("*", (req, res) => {
-  // If an /api route is missing, return JSON 404 instead of index.html
+// IMPORTANT: use /.*/ instead of "*" to avoid path-to-regexp crash in newer router stacks
+app.get(/.*/, (req, res) => {
   if (req.path.startsWith("/api/")) {
     return res.status(404).json({ ok: false, error: "NO_ROUTE" });
   }
