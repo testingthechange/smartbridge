@@ -23,62 +23,17 @@ function useQuery() {
 function ensureProject(project, projectId) {
   const base = project && typeof project === "object" ? project : {};
   const songsRaw = Array.isArray(base?.catalog?.songs) ? base.catalog.songs : [];
-
   const songs = songsRaw.length
-    ? songsRaw.map((s, idx) => {
-        const slot = Number(s?.slot ?? idx + 1);
-        const files = s?.files && typeof s.files === "object" ? s.files : {};
-        const uploadRequests =
-          s?.uploadRequests && typeof s.uploadRequests === "object"
-            ? s.uploadRequests
-            : emptySong(slot).uploadRequests;
-
-        return {
-          ...emptySong(slot),
-          ...s,
-          slot,
-          title: String(s?.title || ""),
-          files: {
-            album: { fileName: "", s3Key: "", playbackUrl: "", ...(files.album || {}) },
-            a: { fileName: "", s3Key: "", playbackUrl: "", ...(files.a || {}) },
-            b: { fileName: "", s3Key: "", playbackUrl: "", ...(files.b || {}) },
-          },
-          uploadRequests: {
-            album: {
-              requestedFileName: String(uploadRequests?.album?.requestedFileName || ""),
-              notes: String(uploadRequests?.album?.notes || ""),
-            },
-            a: {
-              requestedFileName: String(uploadRequests?.a?.requestedFileName || ""),
-              notes: String(uploadRequests?.a?.notes || ""),
-            },
-            b: {
-              requestedFileName: String(uploadRequests?.b?.requestedFileName || ""),
-              notes: String(uploadRequests?.b?.notes || ""),
-            },
-          },
-        };
-      })
+    ? songsRaw
     : Array.from({ length: 9 }, (_, i) => emptySong(i + 1));
 
   return {
     projectId: String(base.projectId || projectId),
-    title: String(base.title || ""),
-    producerName: String(base.producerName || ""),
-    catalog: { ...(base.catalog || {}), songs },
+    catalog: { songs },
     masterSave: base.masterSave || {},
     producerReturnReceived: Boolean(base.producerReturnReceived),
     producerReturnReceivedAt: String(base.producerReturnReceivedAt || ""),
   };
-}
-
-function bestPlayableUrl(song) {
-  const f = song?.files || {};
-  return (
-    String(f?.album?.playbackUrl || "") ||
-    String(f?.a?.playbackUrl || "") ||
-    String(f?.b?.playbackUrl || "")
-  );
 }
 
 export default function Catalog() {
@@ -86,587 +41,178 @@ export default function Catalog() {
   const query = useQuery();
 
   const projectId = String(projectIdParam || "demo");
-  const token = String(query.get("token") || "").trim();
+  const token = String(query.get("token") || "");
 
   const [project, setProject] = useState(() =>
     ensureProject(loadProject(projectId), projectId)
   );
 
-  const [confirmStep, setConfirmStep] = useState(0);
-  const [status, setStatus] = useState("");
-
-  const [uploadingKey, setUploadingKey] = useState("");
-  const [uploadErr, setUploadErr] = useState("");
-  const [refreshing, setRefreshing] = useState(false);
-
-  // Player state
   const audioRef = useRef(null);
-  const [nowPlaying, setNowPlaying] = useState({
-    slot: null,
-    version: "",
-    title: "",
-    url: "",
-  });
+  const [nowPlaying, setNowPlaying] = useState(null);
   const [playerErr, setPlayerErr] = useState("");
-  const [playerStatus, setPlayerStatus] = useState("idle"); // idle | loading | playing | paused | error
 
-  const canUpload = !String(window.location.hostname || "").includes("smartbridge2.onrender.com");
+  const canUpload = !window.location.hostname.includes("smartbridge2.onrender.com");
 
-  // Whenever nowPlaying.url changes, load it into the audio element.
-  useEffect(() => {
-    const el = audioRef.current;
-    if (!el) return;
-
-    setPlayerErr("");
-
-    if (!nowPlaying.url) {
-      try {
-        el.pause();
-      } catch {}
-      el.removeAttribute("src");
-      el.load();
-      setPlayerStatus("idle");
-      return;
-    }
-
-    // Force refresh when URL changes
-    try {
-      el.pause();
-    } catch {}
-    el.src = nowPlaying.url;
-    el.load();
-    setPlayerStatus("loading");
-
-    // Try to play; if browser blocks autoplay, controls still let user press play.
-    el.play()
-      .then(() => setPlayerStatus("playing"))
-      .catch((e) => {
-        setPlayerStatus("paused");
-        setPlayerErr(
-          e?.name === "NotAllowedError"
-            ? "Press play in the player (browser blocked autoplay)."
-            : (e?.message || "Playback failed.")
-        );
-      });
-  }, [nowPlaying.url]);
-
-  // Audio event wiring (robust)
-  useEffect(() => {
-    const el = audioRef.current;
-    if (!el) return;
-
-    const onPlay = () => setPlayerStatus("playing");
-    const onPause = () => setPlayerStatus((s) => (s === "error" ? "error" : "paused"));
-    const onWaiting = () => setPlayerStatus("loading");
-    const onCanPlay = () => setPlayerStatus((s) => (s === "loading" ? "paused" : s));
-    const onError = () => {
-      const code = el.error?.code;
-      setPlayerStatus("error");
-      setPlayerErr(code ? `Audio error (code ${code}). Try Refresh playback URLs.` : "Audio error.");
-    };
-
-    el.addEventListener("play", onPlay);
-    el.addEventListener("pause", onPause);
-    el.addEventListener("waiting", onWaiting);
-    el.addEventListener("canplay", onCanPlay);
-    el.addEventListener("error", onError);
-
-    return () => {
-      el.removeEventListener("play", onPlay);
-      el.removeEventListener("pause", onPause);
-      el.removeEventListener("waiting", onWaiting);
-      el.removeEventListener("canplay", onCanPlay);
-      el.removeEventListener("error", onError);
-    };
-  }, []);
-
-  function updateSongTitle(slot, title) {
+  function updateSong(slot, updater) {
     setProject((prev) => {
       const next = ensureProject(prev, projectId);
       next.catalog.songs = next.catalog.songs.map((s) =>
-        Number(s.slot) === Number(slot) ? { ...s, title: String(title || "") } : s
+        Number(s.slot) === Number(slot) ? updater(s) : s
       );
       saveProject(projectId, next);
       return next;
     });
   }
 
-  function updateUploadRequest(slot, versionKey, field, value) {
-    setProject((prev) => {
-      const next = ensureProject(prev, projectId);
-      next.catalog.songs = next.catalog.songs.map((s) => {
-        if (Number(s.slot) !== Number(slot)) return s;
-        const ur = s.uploadRequests || emptySong(slot).uploadRequests;
-        return {
-          ...s,
-          uploadRequests: {
-            ...ur,
-            [versionKey]: {
-              ...(ur[versionKey] || {}),
-              [field]: String(value || ""),
-            },
-          },
-        };
-      });
-      saveProject(projectId, next);
-      return next;
-    });
-  }
-
-  function playSong(song, preferredVersion = "") {
-    setPlayerErr("");
-    const f = song?.files || {};
-    const url =
-      (preferredVersion && String(f?.[preferredVersion]?.playbackUrl || "")) ||
-      bestPlayableUrl(song);
-
+  function play(url) {
     if (!url) {
-      setPlayerErr("No playback URL for this song. Try Refresh playback URLs.");
+      setPlayerErr("No playback URL.");
       return;
     }
-
-    const title = String(song?.title || `Song ${song?.slot || ""}`).trim();
-    setNowPlaying({
-      slot: Number(song?.slot || 0),
-      version: preferredVersion || "",
-      title,
-      url,
-    });
-  }
-
-  async function onUpload(slot, versionKey, file) {
-    setUploadErr("");
-    if (!file) return;
-
-    const maxBytes = MAX_UPLOAD_MB * 1024 * 1024;
-    if (file.size > maxBytes) {
-      setUploadErr(`File too large. Max ${MAX_UPLOAD_MB}MB.`);
-      return;
-    }
-
-    const apiBase = getApiBase();
-    const key = `${slot}:${versionKey}`;
-    setUploadingKey(key);
-
-    try {
-      const up = await uploadSongFile({
-        apiBase,
-        projectId,
-        slot,
-        versionKey,
-        file,
-        token,
-      });
-
-      const s3Key = String(up?.s3Key || "");
-      const playbackUrl = s3Key
-        ? await fetchPlaybackUrl({ apiBase, s3Key, token })
-        : "";
-
-      setProject((prev) => {
-        const next = ensureProject(prev, projectId);
-        next.catalog.songs = next.catalog.songs.map((s) => {
-          if (Number(s.slot) !== Number(slot)) return s;
-
-          const files = s.files || {};
-          const existing = files[versionKey] || {
-            fileName: "",
-            s3Key: "",
-            playbackUrl: "",
-          };
-
-          return {
-            ...s,
-            files: {
-              ...files,
-              [versionKey]: {
-                ...existing,
-                fileName: file.name,
-                s3Key,
-                playbackUrl,
-              },
-            },
-          };
-        });
-
-        saveProject(projectId, next);
-        return next;
-      });
-    } catch (e) {
-      setUploadErr(e?.message || "Upload failed.");
-    } finally {
-      setUploadingKey("");
-    }
-  }
-
-  async function refreshPlaybackUrls() {
-    setUploadErr("");
-    setRefreshing(true);
-    try {
-      const apiBase = getApiBase();
-
-      const updates = [];
-      for (const s of project.catalog.songs) {
-        for (const vk of ["album", "a", "b"]) {
-          const s3Key = String(s?.files?.[vk]?.s3Key || "");
-          if (!s3Key) continue;
-          updates.push({ slot: Number(s.slot), vk, s3Key });
-        }
-      }
-
-      if (!updates.length) {
-        setRefreshing(false);
-        return;
-      }
-
-      const urlMap = new Map();
-      for (const u of updates) {
-        const url = await fetchPlaybackUrl({ apiBase, s3Key: u.s3Key, token });
-        urlMap.set(`${u.slot}:${u.vk}`, String(url || ""));
-      }
-
-      setProject((prev) => {
-        const next = ensureProject(prev, projectId);
-        next.catalog.songs = next.catalog.songs.map((s) => {
-          const files = s.files || {};
-          const out = { ...s, files: { ...files } };
-          for (const vk of ["album", "a", "b"]) {
-            const key = `${Number(s.slot)}:${vk}`;
-            if (!urlMap.has(key)) continue;
-            out.files[vk] = { ...(out.files[vk] || {}), playbackUrl: urlMap.get(key) || "" };
-          }
-          return out;
-        });
-        saveProject(projectId, next);
-        return next;
-      });
-    } catch (e) {
-      setUploadErr(e?.message || "Refresh failed.");
-    } finally {
-      setRefreshing(false);
-    }
-  }
-
-  async function onMasterSave() {
-    setStatus("Master saving…");
-    try {
-      const apiBase = getApiBase();
-      const snapshot = buildSnapshot({ projectId, project });
-      const projectForBackend = projectForBackendFromSnapshot(snapshot);
-
-      await postMasterSave({ apiBase, projectId, projectForBackend, token });
-
-      const now = new Date().toISOString();
-      setProject((prev) => {
-        const next = ensureProject(prev, projectId);
-        next.producerReturnReceived = true;
-        next.producerReturnReceivedAt = now;
-        next.masterSave = {
-          ...(next.masterSave || {}),
-          lastMasterSaveAt: now,
-          sections: {
-            ...(next.masterSave?.sections || {}),
-            catalog: { complete: true, masterSavedAt: now },
-          },
-        };
-        saveProject(projectId, next);
-        return next;
-      });
-
-      setConfirmStep(0);
-      setStatus("Master Save complete.");
-    } catch (e) {
-      setConfirmStep(0);
-      setStatus(e?.message || "Master Save failed.");
-    }
+    setPlayerErr("");
+    audioRef.current.src = url;
+    audioRef.current.play().catch(() => {});
   }
 
   return (
-    <div style={{ maxWidth: 1120, margin: "0 auto", padding: "16px 0 92px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-        <h2 style={{ marginTop: 10, marginBottom: 10 }}>Catalog</h2>
+    <div style={{ maxWidth: 1120, margin: "0 auto", paddingBottom: 100 }}>
+      <h2>Catalog</h2>
 
-        <button
-          onClick={refreshPlaybackUrls}
-          disabled={refreshing}
-          style={{
-            padding: "10px 12px",
-            borderRadius: 10,
-            border: "1px solid rgba(0,0,0,0.2)",
-            background: "rgba(255,255,255,0.06)",
-            cursor: refreshing ? "not-allowed" : "pointer",
-            opacity: refreshing ? 0.6 : 1,
-          }}
-        >
-          {refreshing ? "Refreshing…" : "Refresh playback URLs"}
-        </button>
-      </div>
-
-      {!canUpload ? (
-        <div
-          style={{
-            marginBottom: 12,
-            padding: 10,
-            borderRadius: 12,
-            border: "1px solid rgba(255,77,79,0.45)",
-            background: "rgba(255,77,79,0.10)",
-            fontSize: 12,
-          }}
-        >
-          Uploads are disabled on smartbridge2 (static site). Upload in publisher/admin backend.
-          Use “Request Upload” fields below to tell admin what you uploaded. This page can still
-          preview existing playback URLs and submit Master Save.
+      {!canUpload && (
+        <div style={{ color: "red", fontSize: 12, marginBottom: 12 }}>
+          upload-to-s3 disabled on smartbridge2 (static site). Upload in publisher/admin backend.
         </div>
-      ) : null}
+      )}
 
-      {uploadErr ? (
-        <div style={{ marginBottom: 10, color: "#ff4d4f", fontSize: 12 }}>{uploadErr}</div>
-      ) : null}
+      {project.catalog.songs.map((s) => (
+        <div
+          key={s.slot}
+          style={{
+            border: "1px solid #ddd",
+            borderRadius: 12,
+            padding: 12,
+            marginBottom: 14,
+          }}
+        >
+          <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10 }}>
+            <div style={{ width: 40 }}>#{s.slot}</div>
+            <input
+              value={s.title || ""}
+              onChange={(e) =>
+                updateSong(s.slot, (x) => ({ ...x, title: e.target.value }))
+              }
+              placeholder={`Song ${s.slot} title`}
+              style={{ flex: 1, padding: 8 }}
+            />
+            <button onClick={() => play(s.files.album.playbackUrl)}>Play</button>
+          </div>
 
-      <div
-        style={{
-          border: "1px solid rgba(0,0,0,0.15)",
-          borderRadius: 12,
-          padding: 12,
-          background: "rgba(255,255,255,0.02)",
-        }}
-      >
-        {project.catalog.songs.map((s) => (
+          {/* THREE-COLUMN VERSION LAYOUT */}
           <div
-            key={s.slot}
             style={{
-              padding: "10px 0",
-              borderBottom: "1px solid rgba(0,0,0,0.08)",
+              display: "grid",
+              gridTemplateColumns: "repeat(3, 1fr)",
+              gap: 12,
             }}
           >
-            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-              <div style={{ width: 44, opacity: 0.7 }}>#{s.slot}</div>
+            {["album", "a", "b"].map((vk) => {
+              const f = s.files[vk];
+              const r = s.uploadRequests[vk];
 
-              <input
-                value={s.title || ""}
-                onChange={(e) => updateSongTitle(s.slot, e.target.value)}
-                placeholder={`Song ${s.slot} title`}
-                style={{
-                  flex: 1,
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "1px solid rgba(0,0,0,0.2)",
-                }}
-              />
-
-              <button
-                onClick={() => playSong(s)}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "1px solid rgba(0,0,0,0.2)",
-                  background: "rgba(255,255,255,0.06)",
-                  cursor: "pointer",
-                }}
-              >
-                Play
-              </button>
-            </div>
-
-            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 10 }}>
-              {["album", "a", "b"].map((vk) => {
-                const isUploading = uploadingKey === `${s.slot}:${vk}`;
-                const f = (s.files && s.files[vk]) || {};
-                const hasPlayable = Boolean(f.playbackUrl);
-                const req = (s.uploadRequests && s.uploadRequests[vk]) || {
-                  requestedFileName: "",
-                  notes: "",
-                };
-
-                return (
-                  <div
-                    key={vk}
-                    style={{
-                      width: "100%",
-                      border: "1px solid rgba(0,0,0,0.12)",
-                      borderRadius: 12,
-                      padding: 10,
-                      background: "rgba(255,255,255,0.03)",
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                      <div style={{ fontSize: 12, opacity: 0.8 }}>
-                        <b>{vk.toUpperCase()}</b>{" "}
-                        {f.s3Key ? <span style={{ marginLeft: 8, opacity: 0.7 }}>s3Key set</span> : null}
-                        {hasPlayable ? <span style={{ marginLeft: 8, color: "#44d18a" }}>preview ready</span> : null}
-                      </div>
-
-                      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                        {hasPlayable ? (
-                          <button
-                            onClick={() => playSong(s, vk)}
-                            style={{
-                              padding: "8px 10px",
-                              borderRadius: 10,
-                              border: "1px solid rgba(0,0,0,0.2)",
-                              background: "rgba(255,255,255,0.06)",
-                              cursor: "pointer",
-                              fontSize: 12,
-                            }}
-                          >
-                            Play {vk.toUpperCase()}
-                          </button>
-                        ) : null}
-
-                        <input
-                          type="file"
-                          accept="audio/*"
-                          disabled={!canUpload || isUploading}
-                          onChange={(e) => onUpload(s.slot, vk, e.target.files?.[0] || null)}
-                        />
-
-                        {isUploading ? (
-                          <span style={{ fontSize: 12, opacity: 0.8 }}>Uploading…</span>
-                        ) : null}
-                      </div>
-                    </div>
-
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8, marginTop: 10 }}>
-                      <input
-                        value={req.requestedFileName || ""}
-                        onChange={(e) => updateUploadRequest(s.slot, vk, "requestedFileName", e.target.value)}
-                        placeholder={`Request Upload: file name you uploaded for ${vk.toUpperCase()} (e.g., Song${s.slot}_${vk}.wav)`}
-                        style={{
-                          padding: "10px 12px",
-                          borderRadius: 10,
-                          border: "1px solid rgba(0,0,0,0.2)",
-                        }}
-                      />
-                      <input
-                        value={req.notes || ""}
-                        onChange={(e) => updateUploadRequest(s.slot, vk, "notes", e.target.value)}
-                        placeholder={`Notes for admin (optional)`}
-                        style={{
-                          padding: "10px 12px",
-                          borderRadius: 10,
-                          border: "1px solid rgba(0,0,0,0.2)",
-                        }}
-                      />
-                    </div>
+              return (
+                <div
+                  key={vk}
+                  style={{
+                    border: "1px solid #ccc",
+                    borderRadius: 10,
+                    padding: 10,
+                  }}
+                >
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                    {vk.toUpperCase()}
                   </div>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-      </div>
 
-      <div
-        style={{
-          marginTop: 14,
-          border: "1px solid rgba(0,0,0,0.15)",
-          borderRadius: 12,
-          padding: 12,
-          background: "rgba(255,255,255,0.02)",
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-          <div>
-            <div style={{ fontWeight: 700 }}>Master Save</div>
-            <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
-              Finalizes Catalog snapshot (includes upload requests + notes).
-            </div>
-            <div style={{ fontSize: 12, color: "#ff4d4f", marginTop: 6 }}>
-              Use intentionally. This is treated as a finalized submission.
-            </div>
-          </div>
+                  <input
+                    type="file"
+                    disabled={!canUpload}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
 
-          {confirmStep === 0 ? (
-            <button
-              onClick={() => setConfirmStep(1)}
-              style={{
-                padding: "10px 12px",
-                borderRadius: 10,
-                border: "1px solid rgba(0,0,0,0.2)",
-                background: "rgba(255,255,255,0.06)",
-                cursor: "pointer",
-              }}
-            >
-              Master Save…
-            </button>
-          ) : (
-            <div style={{ display: "flex", gap: 10 }}>
-              <button
-                onClick={() => setConfirmStep(0)}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "1px solid rgba(0,0,0,0.2)",
-                  background: "rgba(255,255,255,0.06)",
-                  cursor: "pointer",
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={onMasterSave}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "1px solid rgba(255,77,79,0.6)",
-                  background: "rgba(255,77,79,0.14)",
-                  cursor: "pointer",
-                }}
-              >
-                Confirm Master Save
-              </button>
-            </div>
-          )}
-        </div>
+                      const localUrl = URL.createObjectURL(file);
 
-        {status ? <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>{status}</div> : null}
-      </div>
+                      updateSong(s.slot, (x) => ({
+                        ...x,
+                        files: {
+                          ...x.files,
+                          [vk]: {
+                            ...x.files[vk],
+                            fileName: file.name,
+                            playbackUrl: localUrl,
+                          },
+                        },
+                      }));
 
-      {/* Bottom mini player */}
-      <div
-        style={{
-          position: "fixed",
-          left: 0,
-          right: 0,
-          bottom: 0,
-          borderTop: "1px solid rgba(0,0,0,0.15)",
-          background: "rgba(16,24,36,0.92)",
-          backdropFilter: "blur(8px)",
-        }}
-      >
-        <div
-          style={{
-            maxWidth: 1120,
-            margin: "0 auto",
-            padding: "10px 16px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-            flexWrap: "wrap",
-          }}
-        >
-          <div style={{ fontSize: 12, opacity: 0.9, minWidth: 260 }}>
-            {nowPlaying.url ? (
-              <>
-                Now Playing: <b>#{nowPlaying.slot}</b> {nowPlaying.title}
-                {nowPlaying.version ? ` (${String(nowPlaying.version).toUpperCase()})` : ""}
-                <div style={{ marginTop: 4, fontSize: 11, opacity: 0.75 }}>
-                  Player: {playerStatus}
-                  {playerErr ? <span style={{ color: "#ffb3b3" }}> • {playerErr}</span> : null}
+                      if (canUpload) {
+                        uploadSongFile({
+                          apiBase: getApiBase(),
+                          projectId,
+                          slot: s.slot,
+                          versionKey: vk,
+                          file,
+                          token,
+                        }).catch(() => {});
+                      }
+                    }}
+                  />
+
+                  <input
+                    value={r.requestedFileName}
+                    onChange={(e) =>
+                      updateSong(s.slot, (x) => ({
+                        ...x,
+                        uploadRequests: {
+                          ...x.uploadRequests,
+                          [vk]: { ...r, requestedFileName: e.target.value },
+                        },
+                      }))
+                    }
+                    placeholder="Request upload file name"
+                    style={{ width: "100%", marginTop: 6 }}
+                  />
+
+                  <input
+                    value={r.notes}
+                    onChange={(e) =>
+                      updateSong(s.slot, (x) => ({
+                        ...x,
+                        uploadRequests: {
+                          ...x.uploadRequests,
+                          [vk]: { ...r, notes: e.target.value },
+                        },
+                      }))
+                    }
+                    placeholder="Notes for admin (optional)"
+                    style={{ width: "100%", marginTop: 6 }}
+                  />
+
+                  {f.playbackUrl && (
+                    <button
+                      style={{ marginTop: 8 }}
+                      onClick={() => play(f.playbackUrl)}
+                    >
+                      Play {vk.toUpperCase()}
+                    </button>
+                  )}
                 </div>
-              </>
-            ) : (
-              <>
-                Player: select Play on any song
-                {playerErr ? <div style={{ marginTop: 4, fontSize: 11, color: "#ffb3b3" }}>{playerErr}</div> : null}
-              </>
-            )}
+              );
+            })}
           </div>
-
-          <audio ref={audioRef} controls style={{ height: 34, minWidth: 320 }} />
         </div>
-      </div>
+      ))}
+
+      <audio ref={audioRef} controls style={{ width: "100%", marginTop: 20 }} />
+      {playerErr && <div style={{ color: "red", marginTop: 6 }}>{playerErr}</div>}
     </div>
   );
 }
