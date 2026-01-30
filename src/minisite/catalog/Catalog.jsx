@@ -13,8 +13,8 @@ import {
   uploadSongFile,
   fetchPlaybackUrl,
   MAX_UPLOAD_MB,
-  uploadsEnabled,
 } from "./catalogCore.js";
+
 
 function useQuery() {
   const { search } = useLocation();
@@ -208,7 +208,8 @@ export default function Catalog() {
     }
   }
 
-  const canUpload = uploadsEnabled();
+const canUpload = true;
+
 
   return (
     <div style={{ maxWidth: 1120, margin: "0 auto", padding: "16px 0 92px" }}>
