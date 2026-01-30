@@ -1,5 +1,5 @@
 // FILE: src/minisite/catalog/Catalog.jsx
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
 
 import {
@@ -99,7 +99,7 @@ export default function Catalog() {
   const [uploadErr, setUploadErr] = useState("");
   const [refreshing, setRefreshing] = useState(false);
 
-  // Bottom player
+  // Player state
   const audioRef = useRef(null);
   const [nowPlaying, setNowPlaying] = useState({
     slot: null,
@@ -107,8 +107,78 @@ export default function Catalog() {
     title: "",
     url: "",
   });
+  const [playerErr, setPlayerErr] = useState("");
+  const [playerStatus, setPlayerStatus] = useState("idle"); // idle | loading | playing | paused | error
 
   const canUpload = !String(window.location.hostname || "").includes("smartbridge2.onrender.com");
+
+  // Whenever nowPlaying.url changes, load it into the audio element.
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return;
+
+    setPlayerErr("");
+
+    if (!nowPlaying.url) {
+      try {
+        el.pause();
+      } catch {}
+      el.removeAttribute("src");
+      el.load();
+      setPlayerStatus("idle");
+      return;
+    }
+
+    // Force refresh when URL changes
+    try {
+      el.pause();
+    } catch {}
+    el.src = nowPlaying.url;
+    el.load();
+    setPlayerStatus("loading");
+
+    // Try to play; if browser blocks autoplay, controls still let user press play.
+    el.play()
+      .then(() => setPlayerStatus("playing"))
+      .catch((e) => {
+        setPlayerStatus("paused");
+        setPlayerErr(
+          e?.name === "NotAllowedError"
+            ? "Press play in the player (browser blocked autoplay)."
+            : (e?.message || "Playback failed.")
+        );
+      });
+  }, [nowPlaying.url]);
+
+  // Audio event wiring (robust)
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return;
+
+    const onPlay = () => setPlayerStatus("playing");
+    const onPause = () => setPlayerStatus((s) => (s === "error" ? "error" : "paused"));
+    const onWaiting = () => setPlayerStatus("loading");
+    const onCanPlay = () => setPlayerStatus((s) => (s === "loading" ? "paused" : s));
+    const onError = () => {
+      const code = el.error?.code;
+      setPlayerStatus("error");
+      setPlayerErr(code ? `Audio error (code ${code}). Try Refresh playback URLs.` : "Audio error.");
+    };
+
+    el.addEventListener("play", onPlay);
+    el.addEventListener("pause", onPause);
+    el.addEventListener("waiting", onWaiting);
+    el.addEventListener("canplay", onCanPlay);
+    el.addEventListener("error", onError);
+
+    return () => {
+      el.removeEventListener("play", onPlay);
+      el.removeEventListener("pause", onPause);
+      el.removeEventListener("waiting", onWaiting);
+      el.removeEventListener("canplay", onCanPlay);
+      el.removeEventListener("error", onError);
+    };
+  }, []);
 
   function updateSongTitle(slot, title) {
     setProject((prev) => {
@@ -144,12 +214,16 @@ export default function Catalog() {
   }
 
   function playSong(song, preferredVersion = "") {
+    setPlayerErr("");
     const f = song?.files || {};
     const url =
       (preferredVersion && String(f?.[preferredVersion]?.playbackUrl || "")) ||
       bestPlayableUrl(song);
 
-    if (!url) return;
+    if (!url) {
+      setPlayerErr("No playback URL for this song. Try Refresh playback URLs.");
+      return;
+    }
 
     const title = String(song?.title || `Song ${song?.slot || ""}`).trim();
     setNowPlaying({
@@ -158,12 +232,6 @@ export default function Catalog() {
       title,
       url,
     });
-
-    const el = audioRef.current;
-    if (el) {
-      el.src = url;
-      el.play().catch(() => {});
-    }
   }
 
   async function onUpload(slot, versionKey, file) {
@@ -388,14 +456,12 @@ export default function Catalog() {
 
               <button
                 onClick={() => playSong(s)}
-                disabled={!bestPlayableUrl(s)}
                 style={{
                   padding: "10px 12px",
                   borderRadius: 10,
                   border: "1px solid rgba(0,0,0,0.2)",
                   background: "rgba(255,255,255,0.06)",
-                  cursor: bestPlayableUrl(s) ? "pointer" : "not-allowed",
-                  opacity: bestPlayableUrl(s) ? 1 : 0.5,
+                  cursor: "pointer",
                 }}
               >
                 Play
@@ -556,12 +622,7 @@ export default function Catalog() {
         {status ? <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>{status}</div> : null}
       </div>
 
-      {project.producerReturnReceived ? (
-        <div style={{ marginTop: 10, fontSize: 12, color: "#44d18a" }}>
-          Producer return received at {project.producerReturnReceivedAt}
-        </div>
-      ) : null}
-
+      {/* Bottom mini player */}
       <div
         style={{
           position: "fixed",
@@ -585,18 +646,25 @@ export default function Catalog() {
             flexWrap: "wrap",
           }}
         >
-          <div style={{ fontSize: 12, opacity: 0.85 }}>
+          <div style={{ fontSize: 12, opacity: 0.9, minWidth: 260 }}>
             {nowPlaying.url ? (
               <>
                 Now Playing: <b>#{nowPlaying.slot}</b> {nowPlaying.title}
                 {nowPlaying.version ? ` (${String(nowPlaying.version).toUpperCase()})` : ""}
+                <div style={{ marginTop: 4, fontSize: 11, opacity: 0.75 }}>
+                  Player: {playerStatus}
+                  {playerErr ? <span style={{ color: "#ffb3b3" }}> • {playerErr}</span> : null}
+                </div>
               </>
             ) : (
-              "Player: select Play on any song"
+              <>
+                Player: select Play on any song
+                {playerErr ? <div style={{ marginTop: 4, fontSize: 11, color: "#ffb3b3" }}>{playerErr}</div> : null}
+              </>
             )}
           </div>
 
-          <audio ref={audioRef} controls style={{ height: 34, minWidth: 280 }} />
+          <audio ref={audioRef} controls style={{ height: 34, minWidth: 320 }} />
         </div>
       </div>
     </div>
