@@ -13,8 +13,8 @@ import {
   uploadSongFile,
   fetchPlaybackUrl,
   MAX_UPLOAD_MB,
-  uploadsEnabled,
 } from "./catalogCore.js";
+
 
 function useQuery() {
   const { search } = useLocation();
@@ -222,7 +222,8 @@ export default function Catalog() {
     }
   }
 
-  const canUpload = uploadsEnabled();
+  const canUpload = !String(window.location.hostname || "").includes("smartbridge2.onrender.com");
+
 
   return (
     <div style={{ maxWidth: 1120, margin: "0 auto", padding: "16px 0 92px" }}>
