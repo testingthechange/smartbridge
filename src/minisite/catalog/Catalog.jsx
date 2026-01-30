@@ -15,7 +15,6 @@ import {
   MAX_UPLOAD_MB,
 } from "./catalogCore.js";
 
-
 function useQuery() {
   const { search } = useLocation();
   return useMemo(() => new URLSearchParams(search || ""), [search]);
@@ -29,6 +28,11 @@ function ensureProject(project, projectId) {
     ? songsRaw.map((s, idx) => {
         const slot = Number(s?.slot ?? idx + 1);
         const files = s?.files && typeof s.files === "object" ? s.files : {};
+        const uploadRequests =
+          s?.uploadRequests && typeof s.uploadRequests === "object"
+            ? s.uploadRequests
+            : emptySong(slot).uploadRequests;
+
         return {
           ...emptySong(slot),
           ...s,
@@ -38,6 +42,20 @@ function ensureProject(project, projectId) {
             album: { fileName: "", s3Key: "", playbackUrl: "", ...(files.album || {}) },
             a: { fileName: "", s3Key: "", playbackUrl: "", ...(files.a || {}) },
             b: { fileName: "", s3Key: "", playbackUrl: "", ...(files.b || {}) },
+          },
+          uploadRequests: {
+            album: {
+              requestedFileName: String(uploadRequests?.album?.requestedFileName || ""),
+              notes: String(uploadRequests?.album?.notes || ""),
+            },
+            a: {
+              requestedFileName: String(uploadRequests?.a?.requestedFileName || ""),
+              notes: String(uploadRequests?.a?.notes || ""),
+            },
+            b: {
+              requestedFileName: String(uploadRequests?.b?.requestedFileName || ""),
+              notes: String(uploadRequests?.b?.notes || ""),
+            },
           },
         };
       })
@@ -79,6 +97,7 @@ export default function Catalog() {
 
   const [uploadingKey, setUploadingKey] = useState("");
   const [uploadErr, setUploadErr] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
 
   // Bottom player
   const audioRef = useRef(null);
@@ -89,12 +108,36 @@ export default function Catalog() {
     url: "",
   });
 
+  const canUpload = !String(window.location.hostname || "").includes("smartbridge2.onrender.com");
+
   function updateSongTitle(slot, title) {
     setProject((prev) => {
       const next = ensureProject(prev, projectId);
       next.catalog.songs = next.catalog.songs.map((s) =>
         Number(s.slot) === Number(slot) ? { ...s, title: String(title || "") } : s
       );
+      saveProject(projectId, next);
+      return next;
+    });
+  }
+
+  function updateUploadRequest(slot, versionKey, field, value) {
+    setProject((prev) => {
+      const next = ensureProject(prev, projectId);
+      next.catalog.songs = next.catalog.songs.map((s) => {
+        if (Number(s.slot) !== Number(slot)) return s;
+        const ur = s.uploadRequests || emptySong(slot).uploadRequests;
+        return {
+          ...s,
+          uploadRequests: {
+            ...ur,
+            [versionKey]: {
+              ...(ur[versionKey] || {}),
+              [field]: String(value || ""),
+            },
+          },
+        };
+      });
       saveProject(projectId, next);
       return next;
     });
@@ -188,6 +231,55 @@ export default function Catalog() {
     }
   }
 
+  async function refreshPlaybackUrls() {
+    setUploadErr("");
+    setRefreshing(true);
+    try {
+      const apiBase = getApiBase();
+
+      // Refresh any version that has s3Key (always refresh, URLs can expire)
+      const updates = [];
+      for (const s of project.catalog.songs) {
+        for (const vk of ["album", "a", "b"]) {
+          const s3Key = String(s?.files?.[vk]?.s3Key || "");
+          if (!s3Key) continue;
+          updates.push({ slot: Number(s.slot), vk, s3Key });
+        }
+      }
+
+      if (!updates.length) {
+        setRefreshing(false);
+        return;
+      }
+
+      const urlMap = new Map(); // key `${slot}:${vk}` -> url
+      for (const u of updates) {
+        const url = await fetchPlaybackUrl({ apiBase, s3Key: u.s3Key, token });
+        urlMap.set(`${u.slot}:${u.vk}`, String(url || ""));
+      }
+
+      setProject((prev) => {
+        const next = ensureProject(prev, projectId);
+        next.catalog.songs = next.catalog.songs.map((s) => {
+          const files = s.files || {};
+          const out = { ...s, files: { ...files } };
+          for (const vk of ["album", "a", "b"]) {
+            const key = `${Number(s.slot)}:${vk}`;
+            if (!urlMap.has(key)) continue;
+            out.files[vk] = { ...(out.files[vk] || {}), playbackUrl: urlMap.get(key) || "" };
+          }
+          return out;
+        });
+        saveProject(projectId, next);
+        return next;
+      });
+    } catch (e) {
+      setUploadErr(e?.message || "Refresh failed.");
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   async function onMasterSave() {
     setStatus("Master saving…");
     try {
@@ -222,12 +314,28 @@ export default function Catalog() {
     }
   }
 
-  const canUpload = !String(window.location.hostname || "").includes("smartbridge2.onrender.com");
-
-
   return (
     <div style={{ maxWidth: 1120, margin: "0 auto", padding: "16px 0 92px" }}>
-      <h2 style={{ marginTop: 10, marginBottom: 10 }}>Catalog</h2>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <h2 style={{ marginTop: 10, marginBottom: 10 }}>Catalog</h2>
+
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <button
+            onClick={refreshPlaybackUrls}
+            disabled={refreshing}
+            style={{
+              padding: "10px 12px",
+              borderRadius: 10,
+              border: "1px solid rgba(0,0,0,0.2)",
+              background: "rgba(255,255,255,0.06)",
+              cursor: refreshing ? "not-allowed" : "pointer",
+              opacity: refreshing ? 0.6 : 1,
+            }}
+          >
+            {refreshing ? "Refreshing…" : "Refresh playback URLs"}
+          </button>
+        </div>
+      </div>
 
       {!canUpload ? (
         <div
@@ -241,14 +349,13 @@ export default function Catalog() {
           }}
         >
           Uploads are disabled on smartbridge2 (static site). Upload in publisher/admin backend.
-          This page can still preview existing playback URLs and submit Master Save.
+          Use “Request Upload” fields below to tell admin what you uploaded. This page can still
+          preview existing playback URLs and submit Master Save.
         </div>
       ) : null}
 
       {uploadErr ? (
-        <div style={{ marginBottom: 10, color: "#ff4d4f", fontSize: 12 }}>
-          {uploadErr}
-        </div>
+        <div style={{ marginBottom: 10, color: "#ff4d4f", fontSize: 12 }}>{uploadErr}</div>
       ) : null}
 
       <div
@@ -298,61 +405,88 @@ export default function Catalog() {
               </button>
             </div>
 
+            {/* Version rows */}
             <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 10 }}>
               {["album", "a", "b"].map((vk) => {
                 const isUploading = uploadingKey === `${s.slot}:${vk}`;
                 const f = (s.files && s.files[vk]) || {};
                 const hasPlayable = Boolean(f.playbackUrl);
+                const req = (s.uploadRequests && s.uploadRequests[vk]) || {
+                  requestedFileName: "",
+                  notes: "",
+                };
 
                 return (
                   <div
                     key={vk}
                     style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      padding: "6px 8px",
-                      borderRadius: 10,
+                      width: "100%",
                       border: "1px solid rgba(0,0,0,0.12)",
+                      borderRadius: 12,
+                      padding: 10,
                       background: "rgba(255,255,255,0.03)",
                     }}
                   >
-                    <div style={{ width: 54, fontSize: 12, opacity: 0.75 }}>
-                      {vk.toUpperCase()}
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                      <div style={{ fontSize: 12, opacity: 0.8 }}>
+                        <b>{vk.toUpperCase()}</b>{" "}
+                        {f.s3Key ? <span style={{ marginLeft: 8, opacity: 0.7 }}>s3Key set</span> : null}
+                        {hasPlayable ? <span style={{ marginLeft: 8, color: "#44d18a" }}>preview ready</span> : null}
+                      </div>
+
+                      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                        {hasPlayable ? (
+                          <button
+                            onClick={() => playSong(s, vk)}
+                            style={{
+                              padding: "8px 10px",
+                              borderRadius: 10,
+                              border: "1px solid rgba(0,0,0,0.2)",
+                              background: "rgba(255,255,255,0.06)",
+                              cursor: "pointer",
+                              fontSize: 12,
+                            }}
+                          >
+                            Play {vk.toUpperCase()}
+                          </button>
+                        ) : null}
+
+                        <input
+                          type="file"
+                          accept="audio/*"
+                          disabled={!canUpload || isUploading}
+                          onChange={(e) => onUpload(s.slot, vk, e.target.files?.[0] || null)}
+                        />
+
+                        {isUploading ? (
+                          <span style={{ fontSize: 12, opacity: 0.8 }}>Uploading…</span>
+                        ) : null}
+                      </div>
                     </div>
 
-                    <input
-                      type="file"
-                      accept="audio/*"
-                      disabled={!canUpload || isUploading}
-                      onChange={(e) => onUpload(s.slot, vk, e.target.files?.[0] || null)}
-                    />
-
-                    {isUploading ? (
-                      <span style={{ fontSize: 12, opacity: 0.8 }}>Uploading…</span>
-                    ) : null}
-
-                    {f.fileName ? (
-                      <span style={{ fontSize: 12, opacity: 0.75 }}>
-                        {String(f.fileName)}
-                      </span>
-                    ) : null}
-
-                    {hasPlayable ? (
-                      <button
-                        onClick={() => playSong(s, vk)}
+                    {/* Producer request fields (always available; main path on smartbridge2) */}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8, marginTop: 10 }}>
+                      <input
+                        value={req.requestedFileName || ""}
+                        onChange={(e) => updateUploadRequest(s.slot, vk, "requestedFileName", e.target.value)}
+                        placeholder={`Request Upload: file name you uploaded for ${vk.toUpperCase()} (e.g., Song${s.slot}_${vk}.wav)`}
                         style={{
-                          padding: "6px 8px",
+                          padding: "10px 12px",
                           borderRadius: 10,
                           border: "1px solid rgba(0,0,0,0.2)",
-                          background: "rgba(255,255,255,0.06)",
-                          cursor: "pointer",
-                          fontSize: 12,
                         }}
-                      >
-                        Play {vk.toUpperCase()}
-                      </button>
-                    ) : null}
+                      />
+                      <input
+                        value={req.notes || ""}
+                        onChange={(e) => updateUploadRequest(s.slot, vk, "notes", e.target.value)}
+                        placeholder={`Notes for admin (optional)`}
+                        style={{
+                          padding: "10px 12px",
+                          borderRadius: 10,
+                          border: "1px solid rgba(0,0,0,0.2)",
+                        }}
+                      />
+                    </div>
                   </div>
                 );
               })}
@@ -361,6 +495,7 @@ export default function Catalog() {
         ))}
       </div>
 
+      {/* Master Save */}
       <div
         style={{
           marginTop: 14,
@@ -374,7 +509,7 @@ export default function Catalog() {
           <div>
             <div style={{ fontWeight: 700 }}>Master Save</div>
             <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
-              Warning: finalizes Catalog snapshot.
+              Finalizes Catalog snapshot (includes upload requests + notes).
             </div>
             <div style={{ fontSize: 12, color: "#ff4d4f", marginTop: 6 }}>
               Use intentionally. This is treated as a finalized submission.
@@ -424,9 +559,7 @@ export default function Catalog() {
           )}
         </div>
 
-        {status ? (
-          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>{status}</div>
-        ) : null}
+        {status ? <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>{status}</div> : null}
       </div>
 
       {project.producerReturnReceived ? (
@@ -457,7 +590,6 @@ export default function Catalog() {
             justifyContent: "space-between",
             gap: 12,
             flexWrap: "wrap",
-            color: "inherit",
           }}
         >
           <div style={{ fontSize: 12, opacity: 0.85 }}>
