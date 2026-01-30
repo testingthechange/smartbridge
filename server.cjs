@@ -8,7 +8,7 @@ const { Pool } = require("pg");
 const multer = require("multer");
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Storage helpers
+// Storage helpers (S3/R2-compatible)
 const { saveFileToR2, putJson, getJson } = require("./storage.cjs");
 
 const app = express();
@@ -39,6 +39,7 @@ app.use(express.json({ limit: "25mb" }));
 // ---------- DATABASE ----------
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  // Render Postgres URLs typically require SSL
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : undefined,
 });
 
@@ -192,9 +193,7 @@ app.get("/api/master-save/latest/:projectId", async (req, res) => {
     const latestKey = `storage/projects/${projectId}/producer_returns/latest.json`;
 
     const latest = await getJson(latestKey);
-    const snapKey =
-      String(latest?.latestSnapshotKey || "").trim() ||
-      String(latest?.snapshotKey || "").trim();
+    const snapKey = String(latest?.latestSnapshotKey || "").trim() || String(latest?.snapshotKey || "").trim();
 
     if (!snapKey) {
       return res.status(404).json({ ok: false, error: "NO_LATEST_SNAPSHOT_KEY", latestKey });
@@ -249,6 +248,7 @@ app.use(
 // SPA fallback (must be LAST)
 // IMPORTANT: use /.*/ instead of "*" to avoid path-to-regexp crash in newer router stacks
 app.get(/.*/, (req, res) => {
+  // If an /api route is missing, return JSON 404 instead of index.html
   if (req.path.startsWith("/api/")) {
     return res.status(404).json({ ok: false, error: "NO_ROUTE" });
   }
