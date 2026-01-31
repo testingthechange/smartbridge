@@ -1,119 +1,85 @@
 // FILE: src/minisite/Catalog.jsx
-// FIXED: catalog state persists on refresh (no reset loop)
-// - Reads project from ProjectMiniSiteContext
-// - Writes changes via setSection (single source of truth)
-// - No local component-only state for catalog data
-
-import React, { useMemo, useState } from "react";
-import { useParams, useLocation } from "react-router-dom";
-import { useProjectMiniSite } from "../ProjectMiniSiteContext.jsx";
+import React, { useEffect, useMemo, useState } from "react";
+import { useLocation, useParams } from "react-router-dom";
+import { ensureProject, loadProject, setSection } from "./catalogCore.js";
 
 export default function Catalog() {
   const { projectId } = useParams();
   const qs = new URLSearchParams(useLocation().search || "");
   const token = qs.get("token") || "";
 
-  const { project, setSection } = useProjectMiniSite();
   const pid = String(projectId || "").trim();
 
-  // canonical catalog from project (PERSISTED)
+  const [project, setProject] = useState(() => (pid ? loadProject(pid) : null));
   const catalog = project?.catalog || {};
-  const songs = useMemo(
-    () => (Array.isArray(catalog.songs) ? catalog.songs : []),
-    [catalog.songs]
-  );
+  const songs = useMemo(() => (Array.isArray(catalog?.songs) ? catalog.songs : []), [catalog]);
 
-  // local draft only (safe to reset)
   const [titleDraft, setTitleDraft] = useState("");
 
+  useEffect(() => {
+    if (!pid) return;
+    ensureProject(pid);
+    setProject(loadProject(pid));
+  }, [pid]);
+
+  function refresh() {
+    setProject(loadProject(pid));
+  }
+
   function addSong() {
-    const title = titleDraft.trim();
-    if (!title) return;
+    const t = String(titleDraft || "").trim();
+    if (!t || !pid) return;
 
     const nextSongs = [
       ...songs,
       {
-        id: crypto.randomUUID(),
-        title,
+        slot: songs.length + 1,
+        title: t,
         createdAt: new Date().toISOString(),
       },
     ];
 
-    // 🔒 SINGLE WRITE PATH (persists to storage)
-    setSection(pid, "catalog", {
-      ...catalog,
-      songs: nextSongs,
-    });
-
+    setSection(pid, "catalog", { ...catalog, songs: nextSongs });
     setTitleDraft("");
+    refresh();
   }
 
-  function removeSong(id) {
-    const nextSongs = songs.filter((s) => s.id !== id);
-
-    // 🔒 SINGLE WRITE PATH
-    setSection(pid, "catalog", {
-      ...catalog,
-      songs: nextSongs,
-    });
+  function removeSong(idx) {
+    if (!pid) return;
+    const nextSongs = songs.filter((_, i) => i !== idx);
+    setSection(pid, "catalog", { ...catalog, songs: nextSongs });
+    refresh();
   }
 
   return (
-    <div style={{ padding: 16 }}>
-      <div
-        style={{
-          padding: 12,
-          border: "2px solid #16a34a",
-          borderRadius: 12,
-          marginBottom: 16,
-        }}
-      >
-        <div style={{ fontWeight: 900 }}>CATALOG — FIXED PERSISTENCE</div>
-        <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>
-          projectId: <b>{pid}</b> • token:{" "}
-          <span style={{ fontFamily: "monospace" }}>{token || "—"}</span>
-        </div>
+    <div style={{ padding: 12, border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12 }}>
+      <div style={{ fontWeight: 900 }}>Catalog (localStorage)</div>
+      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
+        projectId: <b>{pid || "—"}</b> • token: <span style={{ fontFamily: "monospace" }}>{token || "—"}</span>
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         <input
           value={titleDraft}
           onChange={(e) => setTitleDraft(e.target.value)}
           placeholder="Add song title"
-          style={{
-            flex: 1,
-            padding: "10px 12px",
-            borderRadius: 10,
-            border: "1px solid rgba(0,0,0,0.18)",
-          }}
+          style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(0,0,0,0.18)" }}
         />
         <button
           onClick={addSong}
-          style={{
-            padding: "10px 14px",
-            borderRadius: 10,
-            border: "1px solid rgba(0,0,0,0.18)",
-            background: "#fff",
-            fontWeight: 800,
-          }}
+          style={{ padding: "10px 14px", borderRadius: 10, border: "1px solid rgba(0,0,0,0.18)", background: "#fff" }}
         >
           Add
         </button>
       </div>
 
-      <div
-        style={{
-          border: "1px solid rgba(0,0,0,0.12)",
-          borderRadius: 12,
-          overflow: "hidden",
-        }}
-      >
+      <div style={{ border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12, overflow: "hidden", marginTop: 12 }}>
         {songs.length === 0 ? (
           <div style={{ padding: 12, opacity: 0.7 }}>No songs yet.</div>
         ) : (
           songs.map((s, i) => (
             <div
-              key={s.id}
+              key={`${i}-${s?.title || ""}`}
               style={{
                 display: "flex",
                 justifyContent: "space-between",
@@ -122,21 +88,20 @@ export default function Catalog() {
                 borderTop: i === 0 ? "none" : "1px solid rgba(0,0,0,0.08)",
               }}
             >
-              <div style={{ fontWeight: 800 }}>{s.title}</div>
+              <div style={{ fontWeight: 700 }}>{s?.title || "(untitled)"}</div>
               <button
-                onClick={() => removeSong(s.id)}
-                style={{
-                  padding: "8px 10px",
-                  borderRadius: 10,
-                  border: "1px solid rgba(0,0,0,0.18)",
-                  background: "#fff",
-                }}
+                onClick={() => removeSong(i)}
+                style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid rgba(0,0,0,0.18)", background: "#fff" }}
               >
                 Remove
               </button>
             </div>
           ))
         )}
+      </div>
+
+      <div style={{ marginTop: 12, fontSize: 12, opacity: 0.6, fontFamily: "monospace" }}>
+        storage key: project_{pid}
       </div>
     </div>
   );
