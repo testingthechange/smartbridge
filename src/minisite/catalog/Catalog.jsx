@@ -14,21 +14,6 @@ import {
   postMasterSave,
 } from "./catalogCore.js";
 
-/**
- * Strip persisted blob: urls (they die on refresh).
- * Keep fileName + s3Key; clear playbackUrl if it's blob:.
- */
-function stripBlobPlaybackUrl(fileObj) {
-  const o = fileObj && typeof fileObj === "object" ? fileObj : {};
-  const playbackUrl = String(o.playbackUrl || "");
-  if (playbackUrl.startsWith("blob:")) return { ...o, playbackUrl: "" };
-  return o;
-}
-
-/**
- * Normalize ALL song objects so older localStorage data
- * never crashes the app on live.
- */
 function normalizeSong(rawSong, slot) {
   const seed = emptySong(slot);
   const s = rawSong && typeof rawSong === "object" ? rawSong : {};
@@ -38,12 +23,14 @@ function normalizeSong(rawSong, slot) {
 
   const normalizeFileObj = (obj, fallback) => {
     const o = obj && typeof obj === "object" ? obj : {};
-    const merged = {
-      fileName: String(o.fileName || fallback?.fileName || ""),
-      s3Key: String(o.s3Key || fallback?.s3Key || ""),
-      playbackUrl: String(o.playbackUrl || fallback?.playbackUrl || ""),
-    };
-    return stripBlobPlaybackUrl(merged);
+    const fileName = String(o.fileName || fallback?.fileName || "");
+    const s3Key = String(o.s3Key || fallback?.s3Key || "");
+    const playbackUrl = String(o.playbackUrl || fallback?.playbackUrl || "");
+
+    // Never persist blob: urls (they die on refresh / route changes)
+    const safePlaybackUrl = playbackUrl.toLowerCase().startsWith("blob:") ? "" : playbackUrl;
+
+    return { fileName, s3Key, playbackUrl: safePlaybackUrl };
   };
 
   return {
@@ -106,44 +93,19 @@ export default function Catalog() {
   const qs = useMemo(() => new URLSearchParams(search), [search]);
   const token = qs.get("token") || "";
   const isAdmin = String(qs.get("admin") || "").trim() === "1";
-
   const isProducerView = Boolean(token) && !isAdmin;
 
-  // Producer page editable; admin page read-only
   const readOnly = Boolean(isAdmin);
+  const canUpload = !readOnly;
 
   const [project, setProject] = useState(() => ensureProject(loadProject(projectId), projectId));
 
-  // IMPORTANT: preview blob URLs must NEVER be persisted.
-  // previewUrls key format: `${slot}:${vk}` -> blobUrl
-  const [previewUrls, setPreviewUrls] = useState({});
-
-  // Self-heal local storage shape (and strip blob urls)
-  useEffect(() => {
-    setProject((prev) => {
-      const healed = ensureProject(prev, projectId);
-      saveProject(projectId, healed);
-      return healed;
-    });
-  }, [projectId]);
-
-  // Cleanup any blob URLs we created
-  useEffect(() => {
-    return () => {
-      try {
-        Object.values(previewUrls || {}).forEach((u) => {
-          if (typeof u === "string" && u.startsWith("blob:")) URL.revokeObjectURL(u);
-        });
-      } catch {}
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Local-only preview URLs (blob) that should NOT be persisted
+  const [localPreviewUrls, setLocalPreviewUrls] = useState({}); // key: `${slot}_${vk}` -> blob url
 
   // Player
   const audioRef = useRef(null);
-
   const [playerErr, setPlayerErr] = useState("");
-  const [nowSrc, setNowSrc] = useState("");
   const [nowLabel, setNowLabel] = useState("");
   const [isPlaying, setIsPlaying] = useState(false);
   const [cur, setCur] = useState(0);
@@ -153,18 +115,36 @@ export default function Catalog() {
   const [uploadErr, setUploadErr] = useState("");
   const [uploadingKey, setUploadingKey] = useState("");
 
-  // Master Save 3-tier confirm
-  // confirmStep: 0 none, 1 "are you sure", 2 "last chance"
+  // Master Save confirm
   const [confirmStep, setConfirmStep] = useState(0);
   const [msStatus, setMsStatus] = useState("");
   const [msSuccessAt, setMsSuccessAt] = useState("");
-
-  const canUpload = !readOnly;
 
   function persist(next) {
     saveProject(projectId, next);
     return next;
   }
+
+  // normalize persisted data on mount / projectId change
+  useEffect(() => {
+    setProject((prev) => {
+      const healed = ensureProject(prev, projectId);
+      saveProject(projectId, healed);
+      return healed;
+    });
+  }, [projectId]);
+
+  // cleanup preview blobs
+  useEffect(() => {
+    return () => {
+      try {
+        Object.values(localPreviewUrls || {}).forEach((u) => {
+          if (typeof u === "string" && u.toLowerCase().startsWith("blob:")) URL.revokeObjectURL(u);
+        });
+      } catch {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function updateSong(slot, updater) {
     if (readOnly) return;
@@ -178,41 +158,41 @@ export default function Catalog() {
     });
   }
 
-  function updateSongFile(slot, vk, patch, { allowIfReadOnly = false } = {}) {
-    if (readOnly && !allowIfReadOnly) return;
-
+  function updateSongFile(slot, vk, patch) {
     setProject((prev) => {
       const next = ensureProject(prev, projectId);
       next.catalog.songs = next.catalog.songs.map((s) => {
         if (Number(s.slot) !== Number(slot)) return s;
-
         const curFiles = s.files || {};
         const cur = curFiles[vk] || { fileName: "", s3Key: "", playbackUrl: "" };
-        const merged = normalizeSong(
+
+        const patchSafe = { ...(patch || {}) };
+        if (typeof patchSafe.playbackUrl === "string" && patchSafe.playbackUrl.toLowerCase().startsWith("blob:")) {
+          delete patchSafe.playbackUrl;
+        }
+
+        return normalizeSong(
           {
             ...s,
-            files: {
-              ...curFiles,
-              [vk]: stripBlobPlaybackUrl({ ...cur, ...(patch || {}) }),
-            },
+            files: { ...curFiles, [vk]: { ...cur, ...patchSafe } },
           },
           Number(slot)
         );
-        return merged;
       });
+
       persist(next);
       return next;
     });
   }
 
   async function playUrl(url, label) {
-    if (!url) {
+    const u = String(url || "").trim();
+    if (!u) {
       setPlayerErr("No playback URL available.");
       return;
     }
 
     setPlayerErr("");
-    setNowSrc(url);
     setNowLabel(label || "");
 
     const a = audioRef.current;
@@ -222,8 +202,8 @@ export default function Catalog() {
       a.muted = false;
       if (typeof a.volume === "number") a.volume = 1;
 
-      if (a.src !== url) {
-        a.src = url;
+      if (a.src !== u) {
+        a.src = u;
         a.load();
       }
       a.currentTime = 0;
@@ -232,33 +212,29 @@ export default function Catalog() {
       setIsPlaying(true);
     } catch {
       setIsPlaying(false);
-      setPlayerErr("Playback blocked or audio failed. Click the version Play button again.");
+      setPlayerErr("Playback blocked. Click any version Play button again.");
     }
   }
 
+  /**
+   * CRITICAL FIX:
+   * - If local preview exists (same session), play it.
+   * - ELSE if s3Key exists, ALWAYS fetch a fresh URL and play it. (ignore stored playbackUrl)
+   * This prevents dead/expired URLs and any accidental blob persistence.
+   */
   async function playVersion(slot, vk) {
     const song = project?.catalog?.songs?.find((x) => Number(x?.slot) === Number(slot));
     const f = song?.files?.[vk] || { fileName: "", s3Key: "", playbackUrl: "" };
-
     const label = `#${slot} ${String(vk).toUpperCase()}${song?.title ? ` — ${song.title}` : ""}`;
 
-    // 1) Prefer in-memory preview blob (works immediately after choosing a file)
-    const previewKey = `${slot}:${vk}`;
-    const previewUrl = String(previewUrls?.[previewKey] || "");
-    if (previewUrl && previewUrl.startsWith("blob:")) {
-      await playUrl(previewUrl, label);
+    const localKey = `${slot}_${vk}`;
+    const localPreview = String(localPreviewUrls?.[localKey] || "");
+    if (localPreview && localPreview.toLowerCase().startsWith("blob:")) {
+      await playUrl(localPreview, label);
       return;
     }
 
-    // 2) If persisted playbackUrl exists (non-blob), use it
-    const existingUrl = String(f.playbackUrl || "");
-    if (existingUrl && !existingUrl.startsWith("blob:")) {
-      await playUrl(existingUrl, label);
-      return;
-    }
-
-    // 3) Otherwise, resolve from backend using s3Key
-    const s3Key = String(f.s3Key || "");
+    const s3Key = String(f.s3Key || "").trim();
     if (!s3Key) {
       setPlayerErr("No uploaded file yet (missing s3Key).");
       return;
@@ -272,8 +248,9 @@ export default function Catalog() {
         return;
       }
 
-      // Persist resolved URL for future reloads (admin can be read-only; allow this)
-      updateSongFile(slot, vk, { playbackUrl: resolved }, { allowIfReadOnly: true });
+      // cache the resolved URL (fine if it expires; we re-resolve next click anyway)
+      updateSongFile(slot, vk, { playbackUrl: resolved });
+
       await playUrl(resolved, label);
     } catch (e) {
       setPlayerErr(e?.message || "Failed to resolve playback URL.");
@@ -283,7 +260,15 @@ export default function Catalog() {
   async function togglePlay() {
     const a = audioRef.current;
     if (!a) return;
-    if (!nowSrc && !a.src) return;
+
+    const src = String(a.src || "").trim();
+    if (!src) return;
+
+    // never resume blob previews from the top button; require clicking version play
+    if (src.toLowerCase().startsWith("blob:")) {
+      setPlayerErr("Preview audio must be started from a version Play button.");
+      return;
+    }
 
     try {
       if (a.paused) {
@@ -317,7 +302,7 @@ export default function Catalog() {
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
     const onEnded = () => setIsPlaying(false);
-    const onError = () => setPlayerErr("Audio failed to load (bad URL or blocked content-type).");
+    const onError = () => setPlayerErr("Audio failed to load (URL expired, blocked, or wrong content-type).");
 
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("durationchange", onDur);
@@ -346,22 +331,21 @@ export default function Catalog() {
     const key = `song_${slot}_${vk}`;
     setUploadingKey(key);
 
-    // 1) Create an in-memory preview blob URL (NOT persisted)
-    const previewKey = `${slot}:${vk}`;
-    setPreviewUrls((prev) => {
-      const next = { ...(prev || {}) };
-      const prevUrl = String(next[previewKey] || "");
-      if (prevUrl && prevUrl.startsWith("blob:")) {
+    // local preview (not persisted)
+    const previewKey = `${slot}_${vk}`;
+    const blobUrl = URL.createObjectURL(file);
+    setLocalPreviewUrls((prev) => {
+      const cur = String(prev?.[previewKey] || "");
+      if (cur && cur.toLowerCase().startsWith("blob:")) {
         try {
-          URL.revokeObjectURL(prevUrl);
+          URL.revokeObjectURL(cur);
         } catch {}
       }
-      next[previewKey] = URL.createObjectURL(file);
-      return next;
+      return { ...(prev || {}), [previewKey]: blobUrl };
     });
 
-    // 2) Persist ONLY fileName (and clear playbackUrl so we never accidentally save blob)
-    updateSongFile(slot, vk, { fileName: file.name, playbackUrl: "" });
+    // persist fileName only (no blob playbackUrl)
+    updateSongFile(slot, vk, { fileName: file.name });
 
     if (!canUpload) {
       setUploadingKey("");
@@ -370,28 +354,16 @@ export default function Catalog() {
 
     try {
       const apiBase = getApiBase();
-      const res = await uploadSongFile({
-        apiBase,
-        projectId,
-        slot,
-        versionKey: vk,
-        file,
-        token,
-      });
+      const res = await uploadSongFile({ apiBase, projectId, slot, versionKey: vk, file, token });
 
       const s3Key = String(res?.s3Key || "");
       const publicUrl = String(res?.publicUrl || "");
 
-      // Ensure we persist a non-blob URL that survives reload
-      let resolvedUrl = publicUrl;
-      if (!resolvedUrl && s3Key) {
-        resolvedUrl = await fetchPlaybackUrl({ apiBase, s3Key, token });
-      }
-
+      // Cache whatever backend provides; but playback uses s3Key anyway.
       updateSongFile(slot, vk, {
         fileName: file.name,
         s3Key,
-        playbackUrl: String(resolvedUrl || ""),
+        playbackUrl: publicUrl || "",
       });
     } catch (e) {
       setUploadErr(e?.message || "Upload failed.");
@@ -449,22 +421,9 @@ export default function Catalog() {
         {isProducerView ? <span style={{ marginLeft: 8, opacity: 0.75 }}>(producer)</span> : null}
       </div>
 
-      {/* Player */}
-      <div
-        style={{
-          border: "1px solid #ccc",
-          borderRadius: 12,
-          padding: 12,
-          marginBottom: 14,
-          background: "#f9f9f9",
-        }}
-      >
+      <div style={{ border: "1px solid #ccc", borderRadius: 12, padding: 12, marginBottom: 14, background: "#f9f9f9" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <button
-            onClick={togglePlay}
-            style={{ padding: "8px 12px" }}
-            disabled={!nowSrc && !audioRef.current?.src}
-          >
+          <button onClick={togglePlay} style={{ padding: "8px 12px" }} disabled={!audioRef.current?.src}>
             {isPlaying ? "Pause" : "Play"}
           </button>
 
@@ -496,28 +455,14 @@ export default function Catalog() {
       {uploadErr ? <div style={{ color: "red", fontSize: 12, marginBottom: 10 }}>{uploadErr}</div> : null}
 
       {project.catalog.songs.map((s) => (
-        <div
-          key={s.slot}
-          style={{
-            border: "1px solid #ddd",
-            borderRadius: 12,
-            padding: 14,
-            marginBottom: 16,
-            background: "#fff",
-          }}
-        >
+        <div key={s.slot} style={{ border: "1px solid #ddd", borderRadius: 12, padding: 14, marginBottom: 16, background: "#fff" }}>
           <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
             <div style={{ width: 36, opacity: 0.7 }}>#{s.slot}</div>
             <input
               value={s.title || ""}
               onChange={(e) => updateSong(s.slot, (x) => ({ ...x, title: e.target.value }))}
               placeholder={`Song ${s.slot} title`}
-              style={{
-                width: "50%",
-                padding: "8px 10px",
-                borderRadius: 8,
-                border: "1px solid #ccc",
-              }}
+              style={{ width: "50%", padding: "8px 10px", borderRadius: 8, border: "1px solid #ccc" }}
               disabled={readOnly}
             />
           </div>
@@ -529,20 +474,11 @@ export default function Catalog() {
               const isUp = uploadingKey === key;
               const inputId = `file_${projectId}_${s.slot}_${vk}`;
 
-              const previewKey = `${s.slot}:${vk}`;
-              const hasPreview = Boolean(previewUrls?.[previewKey]);
-              const canPlay = hasPreview || Boolean(f.playbackUrl) || Boolean(f.s3Key);
+              const localKey = `${s.slot}_${vk}`;
+              const hasLocalPreview = Boolean(String(localPreviewUrls?.[localKey] || "").toLowerCase().startsWith("blob:"));
 
               return (
-                <div
-                  key={vk}
-                  style={{
-                    border: "1px solid #ccc",
-                    borderRadius: 10,
-                    padding: 10,
-                    background: "#fafafa",
-                  }}
-                >
+                <div key={vk} style={{ border: "1px solid #ccc", borderRadius: 10, padding: 10, background: "#fafafa" }}>
                   <div style={{ fontWeight: 600, marginBottom: 6 }}>{String(vk).toUpperCase()}</div>
 
                   <input
@@ -573,23 +509,13 @@ export default function Catalog() {
                     ) : (
                       <div style={{ opacity: 0.65 }}>No file chosen</div>
                     )}
-
-                    {hasPreview ? (
-                      <div style={{ marginTop: 4, opacity: 0.7 }}>Preview ready (local)</div>
-                    ) : null}
-
                     {f.s3Key ? (
-                      <div style={{ marginTop: 4, opacity: 0.65, wordBreak: "break-word" }}>
-                        s3Key: {f.s3Key}
-                      </div>
+                      <div style={{ marginTop: 4, opacity: 0.65, wordBreak: "break-word" }}>s3Key: {f.s3Key}</div>
                     ) : null}
+                    {hasLocalPreview ? <div style={{ marginTop: 4, opacity: 0.65 }}>(local preview ready)</div> : null}
                   </div>
 
-                  <button
-                    style={{ marginTop: 10 }}
-                    onClick={() => playVersion(s.slot, vk)}
-                    disabled={isUp || !canPlay}
-                  >
+                  <button style={{ marginTop: 10 }} onClick={() => playVersion(s.slot, vk)} disabled={isUp || (!hasLocalPreview && !f.s3Key)}>
                     {isUp ? "Uploading…" : `Play ${String(vk).toUpperCase()}`}
                   </button>
                 </div>
@@ -599,16 +525,7 @@ export default function Catalog() {
         </div>
       ))}
 
-      {/* Master Save: producer only; admin read-only */}
-      <div
-        style={{
-          border: "1px solid rgba(0,0,0,0.18)",
-          borderRadius: 12,
-          padding: 12,
-          background: "#ffffff",
-          marginTop: 6,
-        }}
-      >
+      <div style={{ border: "1px solid rgba(0,0,0,0.18)", borderRadius: 12, padding: 12, background: "#ffffff", marginTop: 6 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <div style={{ fontWeight: 800 }}>Master Save</div>
@@ -623,21 +540,9 @@ export default function Catalog() {
         </div>
 
         {!readOnly && confirmStep === 1 ? (
-          <div
-            style={{
-              marginTop: 12,
-              padding: 12,
-              borderRadius: 10,
-              border: "1px solid rgba(0,0,0,0.15)",
-              background: "rgba(255, 244, 229, 0.6)",
-            }}
-          >
-            <div style={{ fontWeight: 700, marginBottom: 6 }}>
-              Are you sure you want to Master Save this page?
-            </div>
-            <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}>
-              This will create a finalized snapshot for Catalog.
-            </div>
+          <div style={{ marginTop: 12, padding: 12, borderRadius: 10, border: "1px solid rgba(0,0,0,0.15)", background: "rgba(255, 244, 229, 0.6)" }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>Are you sure you want to Master Save this page?</div>
+            <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}>This will create a finalized snapshot for Catalog.</div>
             <div style={{ display: "flex", gap: 10 }}>
               <button onClick={() => setConfirmStep(0)}>Cancel</button>
               <button onClick={() => setConfirmStep(2)} style={{ border: "1px solid rgba(0,0,0,0.25)" }}>
@@ -648,21 +553,9 @@ export default function Catalog() {
         ) : null}
 
         {!readOnly && confirmStep === 2 ? (
-          <div
-            style={{
-              marginTop: 12,
-              padding: 12,
-              borderRadius: 10,
-              border: "1px solid rgba(176,0,32,0.25)",
-              background: "rgba(255, 235, 238, 0.75)",
-            }}
-          >
-            <div style={{ fontWeight: 800, marginBottom: 6 }}>
-              Last chance. Better double-check everything.
-            </div>
-            <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}>
-              Please confirm titles and uploads. This snapshot is treated as final.
-            </div>
+          <div style={{ marginTop: 12, padding: 12, borderRadius: 10, border: "1px solid rgba(176,0,32,0.25)", background: "rgba(255, 235, 238, 0.75)" }}>
+            <div style={{ fontWeight: 800, marginBottom: 6 }}>Last chance. Better double-check everything.</div>
+            <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}>Please confirm titles and uploads. This snapshot is treated as final.</div>
             <div style={{ display: "flex", gap: 10 }}>
               <button onClick={() => setConfirmStep(1)}>Back</button>
               <button onClick={onMasterSaveConfirm} style={{ border: "1px solid #b00020" }}>
@@ -680,9 +573,7 @@ export default function Catalog() {
         ) : null}
 
         {project.producerReturnReceived ? (
-          <div style={{ marginTop: 10, fontSize: 12, color: "green" }}>
-            Producer return received at {project.producerReturnReceivedAt}
-          </div>
+          <div style={{ marginTop: 10, fontSize: 12, color: "green" }}>Producer return received at {project.producerReturnReceivedAt}</div>
         ) : null}
       </div>
     </div>
