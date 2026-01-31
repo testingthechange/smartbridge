@@ -14,7 +14,7 @@ import {
 } from "./catalogCore.js";
 
 /**
- * CRITICAL: normalize ALL song objects so older localStorage data
+ * Normalize ALL song objects so older localStorage data
  * (missing files.album/a/b etc.) never crashes the app on live.
  */
 function normalizeSong(rawSong, slot) {
@@ -27,9 +27,9 @@ function normalizeSong(rawSong, slot) {
   const normalizeFileObj = (obj, fallback) => {
     const o = obj && typeof obj === "object" ? obj : {};
     return {
-      fileName: String(o.fileName || fallback.fileName || ""),
-      s3Key: String(o.s3Key || fallback.s3Key || ""),
-      playbackUrl: String(o.playbackUrl || fallback.playbackUrl || ""),
+      fileName: String(o.fileName || fallback?.fileName || ""),
+      s3Key: String(o.s3Key || fallback?.s3Key || ""),
+      playbackUrl: String(o.playbackUrl || fallback?.playbackUrl || ""),
     };
   };
 
@@ -65,8 +65,7 @@ function ensureProject(project, projectId) {
 
   const songs = Array.from({ length: 9 }, (_, i) => {
     const slot = i + 1;
-    const found =
-      songsRaw.find((x) => Number(x?.slot) === slot) ?? songsRaw[i] ?? null;
+    const found = songsRaw.find((x) => Number(x?.slot) === slot) ?? songsRaw[i] ?? null;
     return normalizeSong(found, slot);
   });
 
@@ -86,18 +85,6 @@ function fmtTime(sec) {
   return `${m}:${String(r).padStart(2, "0")}`;
 }
 
-function snapshotKey(projectId) {
-  return `project_${projectId}_lastMasterSaveSnapshot`;
-}
-
-function safeParse(json) {
-  try {
-    return JSON.parse(json);
-  } catch {
-    return null;
-  }
-}
-
 export default function Catalog() {
   const { projectId: projectIdParam } = useParams();
   const projectId = String(projectIdParam || "demo");
@@ -105,18 +92,17 @@ export default function Catalog() {
   const { search } = useLocation();
   const qs = new URLSearchParams(search);
   const token = qs.get("token") || "";
-  const isAdmin = (qs.get("admin") || "").trim() === "1";
+  const isAdmin = String(qs.get("admin") || "").trim() === "1";
 
+  // Producer view = token present AND not admin preview
   const isProducerView = Boolean(token) && !isAdmin;
 
-  // Producer token page is editable
-  const readOnly = false;
+  // Producer page editable; admin page read-only
+  const readOnly = Boolean(isAdmin);
 
-  const [project, setProject] = useState(() =>
-    ensureProject(loadProject(projectId), projectId)
-  );
+  const [project, setProject] = useState(() => ensureProject(loadProject(projectId), projectId));
 
-  // One-time self-heal: normalize + persist
+  // Self-heal local storage shape
   useEffect(() => {
     setProject((prev) => {
       const healed = ensureProject(prev, projectId);
@@ -125,22 +111,7 @@ export default function Catalog() {
     });
   }, [projectId]);
 
-  // Admin-only snapshot panel data (stored after Master Save)
-  const [lastSnapshot, setLastSnapshot] = useState(() => {
-    if (!isAdmin) return null;
-    const raw = localStorage.getItem(snapshotKey(projectId));
-    return raw ? safeParse(raw) : null;
-  });
-
-  useEffect(() => {
-    if (!isAdmin) {
-      setLastSnapshot(null);
-      return;
-    }
-    const raw = localStorage.getItem(snapshotKey(projectId));
-    setLastSnapshot(raw ? safeParse(raw) : null);
-  }, [isAdmin, projectId]);
-
+  // Player
   const audioRef = useRef(null);
 
   const [playerErr, setPlayerErr] = useState("");
@@ -150,14 +121,18 @@ export default function Catalog() {
   const [cur, setCur] = useState(0);
   const [dur, setDur] = useState(0);
 
+  // Upload
   const [uploadErr, setUploadErr] = useState("");
   const [uploadingKey, setUploadingKey] = useState("");
 
+  // Master Save 3-tier confirm
+  // confirmStep: 0 none, 1 "are you sure", 2 "last chance"
   const [confirmStep, setConfirmStep] = useState(0);
   const [msStatus, setMsStatus] = useState("");
+  const [msSuccessAt, setMsSuccessAt] = useState("");
 
-  // LIVE: enable uploads (backend will enforce rules)
-  const canUpload = true;
+  // LIVE: enable uploads (backend enforces rules)
+  const canUpload = !readOnly;
 
   function persist(next) {
     saveProject(projectId, next);
@@ -169,20 +144,19 @@ export default function Catalog() {
     setProject((prev) => {
       const next = ensureProject(prev, projectId);
       next.catalog.songs = next.catalog.songs.map((s) =>
-        Number(s.slot) === Number(slot)
-          ? normalizeSong(updater(s), Number(slot))
-          : s
+        Number(s.slot) === Number(slot) ? normalizeSong(updater(s), Number(slot)) : s
       );
       persist(next);
       return next;
     });
   }
 
-  function setAndPlay(url, label) {
+  async function setAndPlay(url, label) {
     if (!url) {
       setPlayerErr("No playback URL available.");
       return;
     }
+
     setPlayerErr("");
     setNowSrc(url);
     setNowLabel(label || "");
@@ -190,24 +164,45 @@ export default function Catalog() {
     const a = audioRef.current;
     if (!a) return;
 
-    if (a.src !== url) a.src = url;
-    a.currentTime = 0;
+    try {
+      // Defensive: ensure not muted / volume set (some browsers persist this)
+      a.muted = false;
+      if (typeof a.volume === "number") a.volume = 1;
 
-    a.play()
-      .then(() => setIsPlaying(true))
-      .catch(() => setIsPlaying(false));
+      if (a.src !== url) {
+        a.src = url;
+        a.load();
+      }
+      a.currentTime = 0;
+
+      await a.play();
+      setIsPlaying(true);
+    } catch (e) {
+      setIsPlaying(false);
+      setPlayerErr("Autoplay blocked or audio failed. Click Play again.");
+    }
   }
 
-  function togglePlay() {
+  async function togglePlay() {
     const a = audioRef.current;
     if (!a) return;
-    if (!nowSrc) return;
 
-    if (a.paused) {
-      a.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
-    } else {
-      a.pause();
+    // If nothing selected yet, no-op
+    if (!nowSrc && !a.src) return;
+
+    try {
+      if (a.paused) {
+        a.muted = false;
+        if (typeof a.volume === "number") a.volume = 1;
+        await a.play();
+        setIsPlaying(true);
+      } else {
+        a.pause();
+        setIsPlaying(false);
+      }
+    } catch {
       setIsPlaying(false);
+      setPlayerErr("Playback blocked. Click any version Play button again.");
     }
   }
 
@@ -227,6 +222,7 @@ export default function Catalog() {
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
     const onEnded = () => setIsPlaying(false);
+    const onError = () => setPlayerErr("Audio failed to load (bad URL or blocked content-type).");
 
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("durationchange", onDur);
@@ -234,6 +230,7 @@ export default function Catalog() {
     a.addEventListener("play", onPlay);
     a.addEventListener("pause", onPause);
     a.addEventListener("ended", onEnded);
+    a.addEventListener("error", onError);
 
     return () => {
       a.removeEventListener("timeupdate", onTime);
@@ -242,6 +239,7 @@ export default function Catalog() {
       a.removeEventListener("play", onPlay);
       a.removeEventListener("pause", onPause);
       a.removeEventListener("ended", onEnded);
+      a.removeEventListener("error", onError);
     };
   }, []);
 
@@ -305,30 +303,21 @@ export default function Catalog() {
     }
   }
 
-  async function onMasterSave() {
+  async function onMasterSaveConfirm() {
+    if (readOnly) return;
+
     setMsStatus("Master saving…");
-    setConfirmStep(0);
+    setMsSuccessAt("");
 
     try {
       const apiBase = getApiBase();
-
-      // Build snapshot once and use it for:
-      // (1) backend payload
-      // (2) local admin reference panel
       const snapshot = buildSnapshot({ projectId, project });
       const projectForBackend = projectForBackendFromSnapshot(snapshot);
 
       await postMasterSave({ apiBase, projectId, projectForBackend, token });
 
-      // Cache snapshot locally for admin reference
-      try {
-        localStorage.setItem(snapshotKey(projectId), JSON.stringify(snapshot));
-        if (isAdmin) setLastSnapshot(snapshot);
-      } catch {
-        // ignore
-      }
-
       const now = new Date().toISOString();
+
       setProject((prev) => {
         const next = ensureProject(prev, projectId);
         next.producerReturnReceived = true;
@@ -345,36 +334,23 @@ export default function Catalog() {
         return next;
       });
 
-      setMsStatus("Master Save complete.");
+      // Step 3 success state
+      setConfirmStep(0);
+      setMsStatus("✅ Congrats! You have successfully Master Saved this page.");
+      setMsSuccessAt(now);
     } catch (e) {
+      setConfirmStep(0);
       setMsStatus(e?.message || "Master Save failed.");
     }
   }
 
-  const snap = lastSnapshot;
-  const snapCatalogSongs = Array.isArray(snap?.project?.catalog?.songs)
-    ? snap.project.catalog.songs
-    : [];
-  const snapAt = String(snap?.updatedAt || snap?.project?.masterSave?.lastMasterSaveAt || "");
-
   return (
-    <div
-      style={{
-        maxWidth: 1120,
-        margin: "0 auto",
-        padding: "18px 0 140px",
-        color: "#111",
-      }}
-    >
+    <div style={{ maxWidth: 1120, margin: "0 auto", padding: "18px 0 140px", color: "#111" }}>
       <h2 style={{ marginBottom: 4 }}>Catalog</h2>
       <div style={{ fontSize: 13, opacity: 0.75, marginBottom: 12 }}>
         Project ID: <b>{projectId}</b>
-        {isAdmin ? (
-          <span style={{ marginLeft: 8, opacity: 0.75 }}>(admin)</span>
-        ) : null}
-        {isProducerView ? (
-          <span style={{ marginLeft: 8, opacity: 0.75 }}>(producer)</span>
-        ) : null}
+        {isAdmin ? <span style={{ marginLeft: 8, opacity: 0.75 }}>(admin)</span> : null}
+        {isProducerView ? <span style={{ marginLeft: 8, opacity: 0.75 }}>(producer)</span> : null}
       </div>
 
       {/* Player */}
@@ -387,19 +363,8 @@ export default function Catalog() {
           background: "#f9f9f9",
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            flexWrap: "wrap",
-          }}
-        >
-          <button
-            onClick={togglePlay}
-            style={{ padding: "8px 12px" }}
-            disabled={!nowSrc}
-          >
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <button onClick={togglePlay} style={{ padding: "8px 12px" }} disabled={!nowSrc && !audioRef.current?.src}>
             {isPlaying ? "Pause" : "Play"}
           </button>
 
@@ -423,22 +388,13 @@ export default function Catalog() {
           />
         </div>
 
-        {playerErr ? (
-          <div style={{ color: "red", fontSize: 12, marginTop: 8 }}>
-            {playerErr}
-          </div>
-        ) : null}
+        {playerErr ? <div style={{ color: "red", fontSize: 12, marginTop: 8 }}>{playerErr}</div> : null}
       </div>
 
       <audio ref={audioRef} />
 
-      {uploadErr ? (
-        <div style={{ color: "red", fontSize: 12, marginBottom: 10 }}>
-          {uploadErr}
-        </div>
-      ) : null}
+      {uploadErr ? <div style={{ color: "red", fontSize: 12, marginBottom: 10 }}>{uploadErr}</div> : null}
 
-      {/* Songs */}
       {project.catalog.songs.map((s) => (
         <div
           key={s.slot}
@@ -450,20 +406,11 @@ export default function Catalog() {
             background: "#fff",
           }}
         >
-          <div
-            style={{
-              display: "flex",
-              gap: 12,
-              alignItems: "center",
-              marginBottom: 12,
-            }}
-          >
+          <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
             <div style={{ width: 36, opacity: 0.7 }}>#{s.slot}</div>
             <input
               value={s.title || ""}
-              onChange={(e) =>
-                updateSong(s.slot, (x) => ({ ...x, title: e.target.value }))
-              }
+              onChange={(e) => updateSong(s.slot, (x) => ({ ...x, title: e.target.value }))}
               placeholder={`Song ${s.slot} title`}
               style={{
                 width: "50%",
@@ -471,22 +418,13 @@ export default function Catalog() {
                 borderRadius: 8,
                 border: "1px solid #ccc",
               }}
+              disabled={readOnly}
             />
           </div>
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(3, 1fr)",
-              gap: 12,
-            }}
-          >
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
             {["album", "a", "b"].map((vk) => {
-              const f = s.files?.[vk] || {
-                fileName: "",
-                s3Key: "",
-                playbackUrl: "",
-              };
+              const f = s.files?.[vk] || { fileName: "", s3Key: "", playbackUrl: "" };
               const key = `song_${s.slot}_${vk}`;
               const isUp = uploadingKey === key;
 
@@ -502,9 +440,7 @@ export default function Catalog() {
                     background: "#fafafa",
                   }}
                 >
-                  <div style={{ fontWeight: 600, marginBottom: 6 }}>
-                    {vk.toUpperCase()}
-                  </div>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>{vk.toUpperCase()}</div>
 
                   {/* Hidden real input */}
                   <input
@@ -512,9 +448,7 @@ export default function Catalog() {
                     type="file"
                     style={{ display: "none" }}
                     disabled={isUp || readOnly}
-                    onChange={(e) =>
-                      onChooseFile(s.slot, vk, e.target.files?.[0] || null)
-                    }
+                    onChange={(e) => onChooseFile(s.slot, vk, e.target.files?.[0] || null)}
                   />
 
                   {/* Always-clickable trigger */}
@@ -545,9 +479,7 @@ export default function Catalog() {
                     onClick={() =>
                       setAndPlay(
                         f.playbackUrl,
-                        `#${s.slot} ${vk.toUpperCase()}${
-                          s.title ? ` — ${s.title}` : ""
-                        }`
+                        `#${s.slot} ${vk.toUpperCase()}${s.title ? ` — ${s.title}` : ""}`
                       )
                     }
                     disabled={!f.playbackUrl || isUp}
@@ -561,7 +493,7 @@ export default function Catalog() {
         </div>
       ))}
 
-      {/* Master Save */}
+      {/* Master Save: producer only; admin read-only */}
       <div
         style={{
           border: "1px solid rgba(0,0,0,0.18)",
@@ -571,14 +503,7 @@ export default function Catalog() {
           marginTop: 6,
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            gap: 12,
-            flexWrap: "wrap",
-          }}
-        >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <div style={{ fontWeight: 800 }}>Master Save</div>
             <div style={{ fontSize: 12, opacity: 0.75 }}>
@@ -586,20 +511,73 @@ export default function Catalog() {
             </div>
           </div>
 
-          {confirmStep === 0 ? (
+          {readOnly ? (
+            <div style={{ fontSize: 12, opacity: 0.7, alignSelf: "center" }}>Admin is read-only.</div>
+          ) : confirmStep === 0 ? (
             <button onClick={() => setConfirmStep(1)}>Master Save…</button>
-          ) : (
+          ) : null}
+        </div>
+
+        {/* Tiered confirmation */}
+        {!readOnly && confirmStep === 1 ? (
+          <div
+            style={{
+              marginTop: 12,
+              padding: 12,
+              borderRadius: 10,
+              border: "1px solid rgba(0,0,0,0.15)",
+              background: "rgba(255, 244, 229, 0.6)",
+            }}
+          >
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>
+              Are you sure you want to Master Save this page?
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}>
+              This will create a finalized snapshot for Catalog.
+            </div>
             <div style={{ display: "flex", gap: 10 }}>
               <button onClick={() => setConfirmStep(0)}>Cancel</button>
-              <button onClick={onMasterSave} style={{ border: "1px solid red" }}>
+              <button onClick={() => setConfirmStep(2)} style={{ border: "1px solid rgba(0,0,0,0.25)" }}>
+                Continue
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {!readOnly && confirmStep === 2 ? (
+          <div
+            style={{
+              marginTop: 12,
+              padding: 12,
+              borderRadius: 10,
+              border: "1px solid rgba(176,0,32,0.25)",
+              background: "rgba(255, 235, 238, 0.75)",
+            }}
+          >
+            <div style={{ fontWeight: 800, marginBottom: 6 }}>
+              Last chance. Better double-check everything.
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}>
+              Please confirm titles and uploads. This snapshot is treated as final.
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => setConfirmStep(1)}>Back</button>
+              <button onClick={onMasterSaveConfirm} style={{ border: "1px solid #b00020" }}>
                 Confirm Master Save
               </button>
             </div>
-          )}
-        </div>
+          </div>
+        ) : null}
 
         {msStatus ? (
-          <div style={{ marginTop: 10, fontSize: 12 }}>{msStatus}</div>
+          <div style={{ marginTop: 12, fontSize: 12 }}>
+            {msStatus}
+            {msSuccessAt ? (
+              <span style={{ marginLeft: 8, opacity: 0.75 }}>
+                ({msSuccessAt})
+              </span>
+            ) : null}
+          </div>
         ) : null}
 
         {project.producerReturnReceived ? (
@@ -608,74 +586,6 @@ export default function Catalog() {
           </div>
         ) : null}
       </div>
-
-      {/* ADMIN ONLY: Snapshot reference panel */}
-      {isAdmin ? (
-        <div
-          style={{
-            marginTop: 14,
-            border: "1px solid rgba(0,0,0,0.18)",
-            borderRadius: 12,
-            padding: 12,
-            background: "#fff",
-          }}
-        >
-          <div style={{ fontWeight: 900, marginBottom: 6 }}>
-            Last Master Save Snapshot (local reference)
-          </div>
-          <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}>
-            {snapAt ? (
-              <>
-                Saved at: <b>{snapAt}</b>
-              </>
-            ) : (
-              "No snapshot cached yet. Run Master Save once."
-            )}
-          </div>
-
-          {snapCatalogSongs.length ? (
-            <div style={{ fontSize: 12, lineHeight: 1.6 }}>
-              {snapCatalogSongs.map((s) => {
-                const files = (s && s.files) || {};
-                const has = (vk) =>
-                  Boolean(
-                    files?.[vk]?.playbackUrl || files?.[vk]?.s3Key || files?.[vk]?.fileName
-                  );
-                return (
-                  <div
-                    key={String(s.slot ?? s.songNumber ?? Math.random())}
-                    style={{ padding: "6px 0", borderTop: "1px solid #eee" }}
-                  >
-                    <div>
-                      <b>#{s.slot}</b> {s.title ? `— ${s.title}` : ""}
-                    </div>
-                    <div style={{ opacity: 0.8 }}>
-                      Album: {has("album") ? "✓" : "—"} • A: {has("a") ? "✓" : "—"} • B:{" "}
-                      {has("b") ? "✓" : "—"}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          ) : null}
-
-          <details style={{ marginTop: 10 }}>
-            <summary style={{ cursor: "pointer" }}>View raw JSON</summary>
-            <pre
-              style={{
-                marginTop: 10,
-                padding: 10,
-                borderRadius: 10,
-                background: "#f6f6f6",
-                overflow: "auto",
-                fontSize: 11,
-              }}
-            >
-              {JSON.stringify(snap || {}, null, 2)}
-            </pre>
-          </details>
-        </div>
-      ) : null}
     </div>
   );
 }
