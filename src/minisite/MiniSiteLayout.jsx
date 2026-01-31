@@ -3,7 +3,7 @@ import React from "react";
 import { Link, Navigate, useLocation, useParams, useSearchParams } from "react-router-dom";
 
 import { ProjectMiniSiteProvider } from "../ProjectMiniSiteContext.jsx";
-import Catalog from "./catalog/Catalog.jsx";
+import Catalog from "./Catalog.jsx";
 
 function ComingSoon({ title }) {
   return (
@@ -12,6 +12,18 @@ function ComingSoon({ title }) {
       <div style={{ opacity: 0.75, fontSize: 13 }}>Not wired yet.</div>
     </div>
   );
+}
+
+function buildSearch(locationSearch, token, isAdmin) {
+  const sp = new URLSearchParams(locationSearch || "");
+  if (token) sp.set("token", token);
+  else sp.delete("token");
+
+  if (isAdmin) sp.set("admin", "1");
+  else sp.delete("admin");
+
+  const s = sp.toString();
+  return s ? `?${s}` : "";
 }
 
 export default function MiniSiteLayout() {
@@ -23,11 +35,15 @@ export default function MiniSiteLayout() {
   const isAdmin = String(searchParams.get("admin") || "").trim() === "1";
   const isProducerView = Boolean(token) && !isAdmin;
 
-  const pid = String(projectIdParam || "demo");
-  const search = location.search || "";
+  const pid = String(projectIdParam || "demo").trim() || "demo";
 
+  // Normalize allowed pages
   const p = String(page || "catalog").toLowerCase();
   const allowed = new Set(["catalog", "album", "nftmix", "songs", "meta"]);
+
+  // Preserve token/admin params (and any other existing params) consistently
+  const search = buildSearch(location.search, token, isAdmin);
+
   if (!allowed.has(p)) {
     return <Navigate to={`/minisite/${encodeURIComponent(pid)}/catalog${search}`} replace />;
   }
@@ -43,7 +59,7 @@ export default function MiniSiteLayout() {
   return (
     <ProjectMiniSiteProvider projectId={pid}>
       <div style={{ minHeight: "100vh", background: "#ffffff", color: "#111" }}>
-        {/* LIGHT HEADER (no black bar) */}
+        {/* Header */}
         <div
           style={{
             borderBottom: "1px solid rgba(0,0,0,0.12)",
@@ -65,20 +81,17 @@ export default function MiniSiteLayout() {
               flexWrap: "wrap",
             }}
           >
-            {/* TITLE + small project line */}
+            {/* Title + project line */}
             <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-              <div style={{ fontWeight: 800, letterSpacing: 0.2 }}>
-                EXECUTIVE PRODUCTION SUITE
-              </div>
+              <div style={{ fontWeight: 800, letterSpacing: 0.2 }}>EXECUTIVE PRODUCTION SUITE</div>
+
               <div style={{ fontSize: 11, opacity: 0.75 }}>
                 Project: <b>{pid}</b>
                 {!isProducerView ? (
                   <>
                     {" "}
                     • Token:{" "}
-                    <span style={{ fontFamily: "monospace" }}>
-                      {token || "—"}
-                    </span>{" "}
+                    <span style={{ fontFamily: "monospace" }}>{token || "—"}</span>
                     {isAdmin ? <span style={{ marginLeft: 8 }}>(admin)</span> : null}
                   </>
                 ) : null}
@@ -114,6 +127,7 @@ export default function MiniSiteLayout() {
           </div>
         </div>
 
+        {/* Body */}
         <div style={{ maxWidth: 1120, margin: "0 auto", padding: "0 16px" }}>
           {p === "catalog" ? <Catalog /> : null}
           {p === "album" ? <ComingSoon title="Album" /> : null}
