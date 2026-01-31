@@ -175,7 +175,11 @@ export default function Catalog() {
       next.catalog.songs = next.catalog.songs.map((s) => {
         if (Number(s.slot) !== Number(slot)) return s;
         const curFiles = s.files || {};
-        const cur = curFiles[vk] || { fileName: "", s3Key: "", playbackUrl: "" };
+        const cur = curFiles[vk] || {
+          fileName: "",
+          s3Key: "",
+          playbackUrl: "",
+        };
         const merged = normalizeSong(
           {
             ...s,
@@ -225,13 +229,17 @@ export default function Catalog() {
   }
 
   async function playVersion(slot, vk) {
-    const song = project?.catalog?.songs?.find((x) => Number(x?.slot) === Number(slot));
+    const song = project?.catalog?.songs?.find(
+      (x) => Number(x?.slot) === Number(slot)
+    );
     const f = song?.files?.[vk] || { fileName: "", s3Key: "", playbackUrl: "" };
 
-    // If playbackUrl is present and not blob:, try it
-    const existingUrl = String(f.playbackUrl || "");
-    const label = `#${slot} ${String(vk).toUpperCase()}${song?.title ? ` — ${song.title}` : ""}`;
+    const label = `#${slot} ${String(vk).toUpperCase()}${
+      song?.title ? ` — ${song.title}` : ""
+    }`;
 
+    // NOTE: never trust a blob: url after refresh. If it's blob:, force resolve.
+    const existingUrl = String(f.playbackUrl || "");
     if (existingUrl && !existingUrl.startsWith("blob:")) {
       await playUrl(existingUrl, label);
       return;
@@ -297,7 +305,9 @@ export default function Catalog() {
     const onPause = () => setIsPlaying(false);
     const onEnded = () => setIsPlaying(false);
     const onError = () =>
-      setPlayerErr("Audio failed to load (bad URL or blocked content-type).");
+      setPlayerErr(
+        "Audio failed to load (bad URL or blocked content-type)."
+      );
 
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("durationchange", onDur);
@@ -326,7 +336,7 @@ export default function Catalog() {
     const key = `song_${slot}_${vk}`;
     setUploadingKey(key);
 
-    // Local preview immediately (DO NOT persist blob on reload; normalize strips it)
+    // Local preview immediately (DO NOT persist blob on refresh; normalize strips it)
     const localUrl = URL.createObjectURL(file);
     updateSongFile(slot, vk, { fileName: file.name, playbackUrl: localUrl });
 
@@ -349,11 +359,20 @@ export default function Catalog() {
       const s3Key = String(res?.s3Key || "");
       const publicUrl = String(res?.publicUrl || "");
 
-      // Persist s3Key and real URL (not blob)
+      // If backend didn't return a publicUrl, resolve one now (so it plays after reload)
+      let resolvedUrl = publicUrl;
+      if (!resolvedUrl && s3Key) {
+        try {
+          resolvedUrl = await fetchPlaybackUrl({ apiBase, s3Key, token });
+        } catch {
+          resolvedUrl = "";
+        }
+      }
+
       updateSongFile(slot, vk, {
         fileName: file.name,
         s3Key,
-        playbackUrl: publicUrl || "",
+        playbackUrl: resolvedUrl || "",
       });
     } catch (e) {
       setUploadErr(e?.message || "Upload failed.");
@@ -403,12 +422,23 @@ export default function Catalog() {
   }
 
   return (
-    <div style={{ maxWidth: 1120, margin: "0 auto", padding: "18px 0 140px", color: "#111" }}>
+    <div
+      style={{
+        maxWidth: 1120,
+        margin: "0 auto",
+        padding: "18px 0 140px",
+        color: "#111",
+      }}
+    >
       <h2 style={{ marginBottom: 4 }}>Catalog</h2>
       <div style={{ fontSize: 13, opacity: 0.75, marginBottom: 12 }}>
         Project ID: <b>{projectId}</b>
-        {isAdmin ? <span style={{ marginLeft: 8, opacity: 0.75 }}>(admin)</span> : null}
-        {isProducerView ? <span style={{ marginLeft: 8, opacity: 0.75 }}>(producer)</span> : null}
+        {isAdmin ? (
+          <span style={{ marginLeft: 8, opacity: 0.75 }}>(admin)</span>
+        ) : null}
+        {isProducerView ? (
+          <span style={{ marginLeft: 8, opacity: 0.75 }}>(producer)</span>
+        ) : null}
       </div>
 
       {/* Player */}
@@ -421,7 +451,9 @@ export default function Catalog() {
           background: "#f9f9f9",
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div
+          style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}
+        >
           <button
             onClick={togglePlay}
             style={{ padding: "8px 12px" }}
@@ -431,7 +463,11 @@ export default function Catalog() {
           </button>
 
           <div style={{ fontSize: 13, opacity: 0.9, minWidth: 240 }}>
-            {nowLabel ? <b>{nowLabel}</b> : <span>Select a version Play below</span>}
+            {nowLabel ? (
+              <b>{nowLabel}</b>
+            ) : (
+              <span>Select a version Play below</span>
+            )}
           </div>
 
           <div style={{ fontSize: 12, opacity: 0.75, minWidth: 80 }}>
@@ -450,12 +486,20 @@ export default function Catalog() {
           />
         </div>
 
-        {playerErr ? <div style={{ color: "red", fontSize: 12, marginTop: 8 }}>{playerErr}</div> : null}
+        {playerErr ? (
+          <div style={{ color: "red", fontSize: 12, marginTop: 8 }}>
+            {playerErr}
+          </div>
+        ) : null}
       </div>
 
       <audio ref={audioRef} />
 
-      {uploadErr ? <div style={{ color: "red", fontSize: 12, marginBottom: 10 }}>{uploadErr}</div> : null}
+      {uploadErr ? (
+        <div style={{ color: "red", fontSize: 12, marginBottom: 10 }}>
+          {uploadErr}
+        </div>
+      ) : null}
 
       {project.catalog.songs.map((s) => (
         <div
@@ -468,11 +512,15 @@ export default function Catalog() {
             background: "#fff",
           }}
         >
-          <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
+          <div
+            style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}
+          >
             <div style={{ width: 36, opacity: 0.7 }}>#{s.slot}</div>
             <input
               value={s.title || ""}
-              onChange={(e) => updateSong(s.slot, (x) => ({ ...x, title: e.target.value }))}
+              onChange={(e) =>
+                updateSong(s.slot, (x) => ({ ...x, title: e.target.value }))
+              }
               placeholder={`Song ${s.slot} title`}
               style={{
                 width: "50%",
@@ -484,7 +532,13 @@ export default function Catalog() {
             />
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(3, 1fr)",
+              gap: 12,
+            }}
+          >
             {["album", "a", "b"].map((vk) => {
               const f = s.files?.[vk] || { fileName: "", s3Key: "", playbackUrl: "" };
               const key = `song_${s.slot}_${vk}`;
@@ -501,14 +555,18 @@ export default function Catalog() {
                     background: "#fafafa",
                   }}
                 >
-                  <div style={{ fontWeight: 600, marginBottom: 6 }}>{String(vk).toUpperCase()}</div>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                    {String(vk).toUpperCase()}
+                  </div>
 
                   <input
                     id={inputId}
                     type="file"
                     style={{ display: "none" }}
                     disabled={isUp || readOnly}
-                    onChange={(e) => onChooseFile(s.slot, vk, e.target.files?.[0] || null)}
+                    onChange={(e) =>
+                      onChooseFile(s.slot, vk, e.target.files?.[0] || null)
+                    }
                   />
 
                   <button
@@ -565,11 +623,15 @@ export default function Catalog() {
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <div style={{ fontWeight: 800 }}>Master Save</div>
-            <div style={{ fontSize: 12, opacity: 0.75 }}>Finalizes Catalog snapshot for this project.</div>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>
+              Finalizes Catalog snapshot for this project.
+            </div>
           </div>
 
           {readOnly ? (
-            <div style={{ fontSize: 12, opacity: 0.7, alignSelf: "center" }}>Admin is read-only.</div>
+            <div style={{ fontSize: 12, opacity: 0.7, alignSelf: "center" }}>
+              Admin is read-only.
+            </div>
           ) : confirmStep === 0 ? (
             <button onClick={() => setConfirmStep(1)}>Master Save…</button>
           ) : null}
@@ -593,7 +655,10 @@ export default function Catalog() {
             </div>
             <div style={{ display: "flex", gap: 10 }}>
               <button onClick={() => setConfirmStep(0)}>Cancel</button>
-              <button onClick={() => setConfirmStep(2)} style={{ border: "1px solid rgba(0,0,0,0.25)" }}>
+              <button
+                onClick={() => setConfirmStep(2)}
+                style={{ border: "1px solid rgba(0,0,0,0.25)" }}
+              >
                 Continue
               </button>
             </div>
@@ -628,7 +693,9 @@ export default function Catalog() {
         {msStatus ? (
           <div style={{ marginTop: 12, fontSize: 12 }}>
             {msStatus}
-            {msSuccessAt ? <span style={{ marginLeft: 8, opacity: 0.75 }}>({msSuccessAt})</span> : null}
+            {msSuccessAt ? (
+              <span style={{ marginLeft: 8, opacity: 0.75 }}>({msSuccessAt})</span>
+            ) : null}
           </div>
         ) : null}
 
