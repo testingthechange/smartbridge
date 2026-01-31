@@ -1,25 +1,18 @@
-// FILE: src/minisite/catalog/Catalog.jsx
 import React, { useEffect, useRef, useState } from "react";
 import { useParams, useLocation } from "react-router-dom";
 import { getApiBase, uploadSongFile, fetchPlaybackUrl } from "./catalogCore.js";
 
 export default function Catalog() {
-  const { projectId: projectIdParam } = useParams();
-  const projectId = String(projectIdParam || "demo");
-
+  const { projectId } = useParams();
   const { search } = useLocation();
-  const qs = new URLSearchParams(search);
-  const token = qs.get("token") || "";
+  const token = new URLSearchParams(search).get("token") || "";
 
   const audioRef = useRef(null);
 
-  const [fileName, setFileName] = useState("");
-  const [s3Key, setS3Key] = useState(
-    () => localStorage.getItem("catalog_test_s3Key") || ""
-  );
-  const [status, setStatus] = useState("");
-  const [playing, setPlaying] = useState(false);
+  const [s3Key, setS3Key] = useState("");
+  const [status, setStatus] = useState("idle");
 
+  // HARD reset audio on mount
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
@@ -32,8 +25,7 @@ export default function Catalog() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setStatus("Uploading…");
-    setFileName(file.name);
+    setStatus("uploading");
 
     try {
       const apiBase = getApiBase();
@@ -46,26 +38,24 @@ export default function Catalog() {
         token,
       });
 
-      if (!res?.s3Key) throw new Error("No s3Key returned");
+      if (!res?.s3Key) throw new Error("NO_S3KEY");
 
-      localStorage.setItem("catalog_test_s3Key", res.s3Key);
       setS3Key(res.s3Key);
-      setStatus("Upload OK");
-    } catch (err) {
-      setStatus(err.message || "Upload failed");
+      localStorage.setItem("CATALOG_TEST_S3KEY", res.s3Key);
+      setStatus("upload_ok");
+    } catch (e) {
+      setStatus("upload_failed");
     }
   }
 
   async function onPlay() {
-    if (!s3Key) {
-      setStatus("No s3Key saved");
-      return;
-    }
-
     try {
+      const key = s3Key || localStorage.getItem("CATALOG_TEST_S3KEY");
+      if (!key) throw new Error("NO_KEY");
+
       const apiBase = getApiBase();
-      const url = await fetchPlaybackUrl({ apiBase, s3Key, token });
-      if (!url) throw new Error("No playback URL");
+      const url = await fetchPlaybackUrl({ apiBase, s3Key: key, token });
+      if (!url) throw new Error("NO_URL");
 
       const a = audioRef.current;
       a.pause();
@@ -75,31 +65,27 @@ export default function Catalog() {
       a.src = url;
       a.currentTime = 0;
       await a.play();
-      setPlaying(true);
-      setStatus("Playing");
-    } catch (err) {
-      setPlaying(false);
-      setStatus(err.message || "Playback failed");
+
+      setStatus("playing");
+    } catch {
+      setStatus("play_failed");
     }
   }
 
   return (
-    <div style={{ maxWidth: 600, margin: "40px auto", fontFamily: "sans-serif" }}>
-      <h2>Catalog – Minimal Test</h2>
+    <div style={{ padding: 40 }}>
+      <h2>CATALOG – MINIMAL TEST</h2>
 
       <input type="file" onChange={onUpload} />
 
-      <div style={{ marginTop: 10 }}>
-        <button onClick={onPlay} disabled={!s3Key}>
-          Play
-        </button>
+      <div style={{ marginTop: 12 }}>
+        <button onClick={onPlay}>PLAY</button>
       </div>
 
-      <div style={{ marginTop: 10, fontSize: 12 }}>
-        <div>File: {fileName || "—"}</div>
-        <div>s3Key: {s3Key || "—"}</div>
-        <div>Status: {status}</div>
-      </div>
+      <pre style={{ marginTop: 20 }}>
+        status: {status}{"\n"}
+        s3Key: {s3Key || "(from localStorage)"}
+      </pre>
 
       <audio ref={audioRef} />
     </div>
