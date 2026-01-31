@@ -1,16 +1,13 @@
-// src/lib/apiBase.js
-// Canonical env var: VITE_API_BASE
-// Legacy supported: VITE_BACKEND_URL
+// FILE: src/lib/api/apiBase.js
 
-export const API_BASE =
-  (import.meta.env.VITE_API_BASE || "").trim() ||
-  (import.meta.env.VITE_BACKEND_URL || "").trim() ||
-  "";
+export const FALLBACK_API_BASE = "https://album-backend-c7ed.onrender.com";
 
-export function requireApiBase(override = "") {
-  const base = String(override || API_BASE || "").replace(/\/+$/, "");
-  if (!base) {
-    throw new Error("Missing VITE_API_BASE in .env.local");
-  }
-  return base;
+export function getApiBase() {
+  const raw =
+    String(import.meta.env.VITE_API_BASE || "").trim() ||
+    String(import.meta.env.VITE_BACKEND_URL || "").trim() ||
+    "";
+
+  const base = raw.replace(/\/+$/, "");
+  return base || FALLBACK_API_BASE;
 }

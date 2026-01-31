@@ -1,6 +1,6 @@
-// src/ProjectMiniSiteContext.jsx
+// FILE: src/ProjectMiniSiteContext.jsx
 import React, { createContext, useContext, useMemo, useState } from "react";
-import { masterSaveMiniSite } from "./lib/masterSaveMiniSite.js";
+import { masterSaveMiniSite } from "./minisite/masterSaveMiniSite.js";
 import { loadProject, saveProject } from "./minisite/projectLocal.js";
 
 const Ctx = createContext(null);
@@ -38,7 +38,12 @@ function isTwoTierComplete(q) {
   const t2 = q?.tier2;
   if (t2?.visible) {
     const t2v = t2?.value;
-    if (t2v === null || typeof t2v === "undefined" || String(t2v).trim() === "") return false;
+    if (
+      t2v === null ||
+      typeof t2v === "undefined" ||
+      String(t2v).trim() === ""
+    )
+      return false;
   }
   return true;
 }
@@ -53,7 +58,10 @@ function validateTwoTier(twoTier) {
 
     for (const [qid, q] of Object.entries(bucket)) {
       if (!isTwoTierComplete(q)) {
-        return { ok: false, message: `Two-tier question incomplete: ${sk}.${qid}` };
+        return {
+          ok: false,
+          message: `Two-tier question incomplete: ${sk}.${qid}`,
+        };
       }
     }
   }
@@ -68,7 +76,10 @@ function validateTwoTier(twoTier) {
 
       for (const [qid, q] of Object.entries(qMap)) {
         if (!isTwoTierComplete(q)) {
-          return { ok: false, message: `Two-tier question incomplete: ${sb}[${songKey}].${qid}` };
+          return {
+            ok: false,
+            message: `Two-tier question incomplete: ${sb}[${songKey}].${qid}`,
+          };
         }
       }
     }
@@ -91,26 +102,32 @@ function hasAnyTwoTier(twoTier) {
   return hasSection || hasSongs || hasMeta;
 }
 
+function normalizeMasterSaveResponse(out) {
+  const snapshotKey = String(out?.snapshotKey || out?.s3Key || out?.key || "");
+  const latestKey = String(out?.latestKey || "");
+  const savedAt = String(
+    out?.savedAt || out?.timestamp || new Date().toISOString()
+  );
+  const masterSaveId = String(out?.masterSaveId || out?.id || "");
+  return { snapshotKey, latestKey, savedAt, masterSaveId };
+}
+
 /* ---------------- Provider ---------------- */
 
 export function ProjectMiniSiteProvider({ projectId, children }) {
   const [tracks, setTracks] = useState(makeDefaultTracks());
   const [sections, setSections] = useState(makeDefaultSections());
 
-  // Two-tier questions state (pages write here)
   const [twoTier, setTwoTier] = useState({});
 
-  // Master Save UX state
   const [masterSaveBusy, setMasterSaveBusy] = useState(false);
   const [lastMasterSaveKey, setLastMasterSaveKey] = useState("");
   const [lastMasterSaveId, setLastMasterSaveId] = useState("");
   const [masterSaveError, setMasterSaveError] = useState("");
 
-  // Freeze/idle state after successful Master Save
   const [masterSavedAt, setMasterSavedAt] = useState("");
   const isMasterSaved = !!masterSavedAt;
 
-  // Master Save tracking block (mini-site level)
   const [masterSave, setMasterSave] = useState({
     lastMasterSaveAt: "",
     sections: {
@@ -125,9 +142,16 @@ export function ProjectMiniSiteProvider({ projectId, children }) {
   async function runMasterSave() {
     if (masterSaveBusy || isMasterSaved) return null;
 
+    const pid = String(projectId || "").trim();
+    if (!pid) {
+      const msg = "Master Save failed: missing projectId";
+      setMasterSaveError(msg);
+      window.alert(msg);
+      return null;
+    }
+
     setMasterSaveError("");
 
-    // Enforce two-tier completeness only if any questions are present
     if (hasAnyTwoTier(twoTier)) {
       const gate = validateTwoTier(twoTier);
       if (!gate.ok) {
@@ -137,7 +161,6 @@ export function ProjectMiniSiteProvider({ projectId, children }) {
       }
     }
 
-    // Two popups always (exact text)
     const ok1 = window.confirm("Are you sure you want to save?");
     if (!ok1) return null;
 
@@ -147,45 +170,27 @@ export function ProjectMiniSiteProvider({ projectId, children }) {
     setMasterSaveBusy(true);
 
     try {
-      // 1) Load current local project
-      const current = loadProject(projectId) || { projectId: String(projectId) };
-      const nowIso = new Date().toISOString();
+      const current = loadProject(pid) || { projectId: pid };
+      const now = new Date().toISOString();
 
-      // 2) Merge mini-site state into the real project object
-      //    IMPORTANT: this is what we want stored in S3 snapshots
       const nextProject = {
         ...current,
-        projectId: String(current?.projectId || projectId),
-        updatedAt: nowIso,
+        projectId: String(current?.projectId || pid),
+        updatedAt: now,
 
-        // keep existing top-level pages untouched; we only attach/refresh these surfaces
         tracks,
         sections,
         twoTier,
-
-        // keep the app-level tracking block too (matches what you showed in snapshots)
-        masterSave: current?.masterSave || current?.masterSave || current?.masterSave,
       };
 
-      // 3) POST full project to backend snapshot route (via your helper)
-      //    We pass both styles:
-      //    - project (for server.js which expects { projectId, project })
-      //    - tracks/sections/twoTier (for older helper versions that still build payload)
       const out = await masterSaveMiniSite({
-        projectId,
+        projectId: pid,
         project: nextProject,
-        tracks,
-        sections,
-        twoTier,
       });
 
-      // 4) Normalize response keys from backend
-      const snapshotKey = String(out?.snapshotKey || out?.s3Key || out?.key || "");
-      const latestKey = String(out?.latestKey || "");
-      const savedAt = String(out?.savedAt || out?.timestamp || new Date().toISOString());
-      const masterSaveId = String(out?.masterSaveId || out?.id || "");
+      const { snapshotKey, latestKey, savedAt, masterSaveId } =
+        normalizeMasterSaveResponse(out);
 
-      // 5) Persist keys back into local project (so reloads can find latest snapshotKey)
       const finalProject = {
         ...nextProject,
         updatedAt: savedAt,
@@ -195,37 +200,30 @@ export function ProjectMiniSiteProvider({ projectId, children }) {
           masterSavedAt: savedAt,
           lastSnapshotKey: snapshotKey,
         },
-        // keep a publish surface if it exists; don't overwrite it
         publish: {
           ...(nextProject?.publish || {}),
           snapshotKey: nextProject?.publish?.snapshotKey || snapshotKey || "",
         },
       };
 
-      saveProject(projectId, finalProject);
+      saveProject(pid, finalProject);
 
-      // 6) Update UI state
       setLastMasterSaveKey(snapshotKey || latestKey);
       setLastMasterSaveId(masterSaveId);
-
-      // Freeze the mini-site
       setMasterSavedAt(savedAt);
 
-      // Update masterSave tracking structure (mini-site UI tracking)
       setMasterSave({
         lastMasterSaveAt: savedAt,
         sections: {
           catalog: { complete: true, masterSavedAt: savedAt },
           album: { complete: true, masterSavedAt: savedAt },
-          nftMix: { complete: false, masterSavedAt: "" }, // optional/iterable
+          nftMix: { complete: false, masterSavedAt: "" },
           songs: { complete: true, masterSavedAt: savedAt },
           meta: { complete: true, masterSavedAt: savedAt },
         },
       });
 
-      // Final confirmation message (explicit)
       window.alert("Master Save confirmed.\n\nSnapshot written.");
-
       return out;
     } catch (e) {
       const msg = typeof e?.message === "string" ? e.message : String(e);
@@ -242,28 +240,23 @@ export function ProjectMiniSiteProvider({ projectId, children }) {
     () => ({
       projectId,
 
-      // data
       tracks,
       setTracks,
       sections,
       setSections,
 
-      // two-tier
       twoTier,
       setTwoTier,
 
-      // master save
       masterSaveBusy,
       masterSaveError,
       lastMasterSaveKey,
       lastMasterSaveId,
       runMasterSave,
 
-      // freeze/idle
       isMasterSaved,
       masterSavedAt,
 
-      // tracking
       masterSave,
       setMasterSave,
     }),
@@ -287,6 +280,7 @@ export function ProjectMiniSiteProvider({ projectId, children }) {
 
 export function useMiniSiteProject() {
   const v = useContext(Ctx);
-  if (!v) throw new Error("useMiniSiteProject must be used inside ProjectMiniSiteProvider");
+  if (!v)
+    throw new Error("useMiniSiteProject must be used inside ProjectMiniSiteProvider");
   return v;
 }
