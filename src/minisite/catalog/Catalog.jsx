@@ -1,5 +1,5 @@
 // FILE: src/minisite/catalog/Catalog.jsx
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
 
 import {
@@ -8,14 +8,28 @@ import {
   emptySong,
   getApiBase,
   uploadSongFile,
+  fetchPlaybackUrl,
   buildSnapshot,
   projectForBackendFromSnapshot,
   postMasterSave,
 } from "./catalogCore.js";
 
 /**
+ * Strip persisted blob: urls (they die on refresh).
+ * Keep fileName + s3Key; clear playbackUrl if it's blob:.
+ */
+function stripBlobPlaybackUrl(fileObj) {
+  const o = fileObj && typeof fileObj === "object" ? fileObj : {};
+  const playbackUrl = String(o.playbackUrl || "");
+  if (playbackUrl.startsWith("blob:")) {
+    return { ...o, playbackUrl: "" };
+  }
+  return o;
+}
+
+/**
  * Normalize ALL song objects so older localStorage data
- * (missing files.album/a/b etc.) never crashes the app on live.
+ * never crashes the app on live.
  */
 function normalizeSong(rawSong, slot) {
   const seed = emptySong(slot);
@@ -26,11 +40,12 @@ function normalizeSong(rawSong, slot) {
 
   const normalizeFileObj = (obj, fallback) => {
     const o = obj && typeof obj === "object" ? obj : {};
-    return {
+    const merged = {
       fileName: String(o.fileName || fallback?.fileName || ""),
       s3Key: String(o.s3Key || fallback?.s3Key || ""),
       playbackUrl: String(o.playbackUrl || fallback?.playbackUrl || ""),
     };
+    return stripBlobPlaybackUrl(merged);
   };
 
   return {
@@ -65,7 +80,8 @@ function ensureProject(project, projectId) {
 
   const songs = Array.from({ length: 9 }, (_, i) => {
     const slot = i + 1;
-    const found = songsRaw.find((x) => Number(x?.slot) === slot) ?? songsRaw[i] ?? null;
+    const found =
+      songsRaw.find((x) => Number(x?.slot) === slot) ?? songsRaw[i] ?? null;
     return normalizeSong(found, slot);
   });
 
@@ -90,19 +106,20 @@ export default function Catalog() {
   const projectId = String(projectIdParam || "demo");
 
   const { search } = useLocation();
-  const qs = new URLSearchParams(search);
+  const qs = useMemo(() => new URLSearchParams(search), [search]);
   const token = qs.get("token") || "";
   const isAdmin = String(qs.get("admin") || "").trim() === "1";
 
-  // Producer view = token present AND not admin preview
   const isProducerView = Boolean(token) && !isAdmin;
 
   // Producer page editable; admin page read-only
   const readOnly = Boolean(isAdmin);
 
-  const [project, setProject] = useState(() => ensureProject(loadProject(projectId), projectId));
+  const [project, setProject] = useState(() =>
+    ensureProject(loadProject(projectId), projectId)
+  );
 
-  // Self-heal local storage shape
+  // Self-heal local storage shape (and strip blob urls)
   useEffect(() => {
     setProject((prev) => {
       const healed = ensureProject(prev, projectId);
@@ -131,7 +148,6 @@ export default function Catalog() {
   const [msStatus, setMsStatus] = useState("");
   const [msSuccessAt, setMsSuccessAt] = useState("");
 
-  // LIVE: enable uploads (backend enforces rules)
   const canUpload = !readOnly;
 
   function persist(next) {
@@ -144,14 +160,40 @@ export default function Catalog() {
     setProject((prev) => {
       const next = ensureProject(prev, projectId);
       next.catalog.songs = next.catalog.songs.map((s) =>
-        Number(s.slot) === Number(slot) ? normalizeSong(updater(s), Number(slot)) : s
+        Number(s.slot) === Number(slot)
+          ? normalizeSong(updater(s), Number(slot))
+          : s
       );
       persist(next);
       return next;
     });
   }
 
-  async function setAndPlay(url, label) {
+  function updateSongFile(slot, vk, patch) {
+    setProject((prev) => {
+      const next = ensureProject(prev, projectId);
+      next.catalog.songs = next.catalog.songs.map((s) => {
+        if (Number(s.slot) !== Number(slot)) return s;
+        const curFiles = s.files || {};
+        const cur = curFiles[vk] || { fileName: "", s3Key: "", playbackUrl: "" };
+        const merged = normalizeSong(
+          {
+            ...s,
+            files: {
+              ...curFiles,
+              [vk]: { ...cur, ...(patch || {}) },
+            },
+          },
+          Number(slot)
+        );
+        return merged;
+      });
+      persist(next);
+      return next;
+    });
+  }
+
+  async function playUrl(url, label) {
     if (!url) {
       setPlayerErr("No playback URL available.");
       return;
@@ -165,7 +207,6 @@ export default function Catalog() {
     if (!a) return;
 
     try {
-      // Defensive: ensure not muted / volume set (some browsers persist this)
       a.muted = false;
       if (typeof a.volume === "number") a.volume = 1;
 
@@ -177,9 +218,43 @@ export default function Catalog() {
 
       await a.play();
       setIsPlaying(true);
-    } catch (e) {
+    } catch {
       setIsPlaying(false);
       setPlayerErr("Autoplay blocked or audio failed. Click Play again.");
+    }
+  }
+
+  async function playVersion(slot, vk) {
+    const song = project?.catalog?.songs?.find((x) => Number(x?.slot) === Number(slot));
+    const f = song?.files?.[vk] || { fileName: "", s3Key: "", playbackUrl: "" };
+
+    // If playbackUrl is present and not blob:, try it
+    const existingUrl = String(f.playbackUrl || "");
+    const label = `#${slot} ${String(vk).toUpperCase()}${song?.title ? ` — ${song.title}` : ""}`;
+
+    if (existingUrl && !existingUrl.startsWith("blob:")) {
+      await playUrl(existingUrl, label);
+      return;
+    }
+
+    // Otherwise, if s3Key exists, resolve a fresh URL from backend and persist it
+    const s3Key = String(f.s3Key || "");
+    if (!s3Key) {
+      setPlayerErr("No uploaded file yet (missing s3Key).");
+      return;
+    }
+
+    try {
+      const apiBase = getApiBase();
+      const resolved = await fetchPlaybackUrl({ apiBase, s3Key, token });
+      if (!resolved) {
+        setPlayerErr("Backend returned no playback URL.");
+        return;
+      }
+      updateSongFile(slot, vk, { playbackUrl: resolved });
+      await playUrl(resolved, label);
+    } catch (e) {
+      setPlayerErr(e?.message || "Failed to resolve playback URL.");
     }
   }
 
@@ -187,7 +262,6 @@ export default function Catalog() {
     const a = audioRef.current;
     if (!a) return;
 
-    // If nothing selected yet, no-op
     if (!nowSrc && !a.src) return;
 
     try {
@@ -222,7 +296,8 @@ export default function Catalog() {
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
     const onEnded = () => setIsPlaying(false);
-    const onError = () => setPlayerErr("Audio failed to load (bad URL or blocked content-type).");
+    const onError = () =>
+      setPlayerErr("Audio failed to load (bad URL or blocked content-type).");
 
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("durationchange", onDur);
@@ -251,19 +326,9 @@ export default function Catalog() {
     const key = `song_${slot}_${vk}`;
     setUploadingKey(key);
 
-    // Local preview immediately
+    // Local preview immediately (DO NOT persist blob on reload; normalize strips it)
     const localUrl = URL.createObjectURL(file);
-    updateSong(slot, (x) => ({
-      ...x,
-      files: {
-        ...(x.files || {}),
-        [vk]: {
-          ...(x.files?.[vk] || { fileName: "", s3Key: "", playbackUrl: "" }),
-          fileName: file.name,
-          playbackUrl: localUrl,
-        },
-      },
-    }));
+    updateSongFile(slot, vk, { fileName: file.name, playbackUrl: localUrl });
 
     if (!canUpload) {
       setUploadingKey("");
@@ -284,18 +349,12 @@ export default function Catalog() {
       const s3Key = String(res?.s3Key || "");
       const publicUrl = String(res?.publicUrl || "");
 
-      updateSong(slot, (x) => ({
-        ...x,
-        files: {
-          ...(x.files || {}),
-          [vk]: {
-            ...(x.files?.[vk] || {}),
-            fileName: file.name,
-            s3Key,
-            playbackUrl: publicUrl || x.files?.[vk]?.playbackUrl || "",
-          },
-        },
-      }));
+      // Persist s3Key and real URL (not blob)
+      updateSongFile(slot, vk, {
+        fileName: file.name,
+        s3Key,
+        playbackUrl: publicUrl || "",
+      });
     } catch (e) {
       setUploadErr(e?.message || "Upload failed.");
     } finally {
@@ -334,7 +393,6 @@ export default function Catalog() {
         return next;
       });
 
-      // Step 3 success state
       setConfirmStep(0);
       setMsStatus("✅ Congrats! You have successfully Master Saved this page.");
       setMsSuccessAt(now);
@@ -364,7 +422,11 @@ export default function Catalog() {
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <button onClick={togglePlay} style={{ padding: "8px 12px" }} disabled={!nowSrc && !audioRef.current?.src}>
+          <button
+            onClick={togglePlay}
+            style={{ padding: "8px 12px" }}
+            disabled={!nowSrc && !audioRef.current?.src}
+          >
             {isPlaying ? "Pause" : "Play"}
           </button>
 
@@ -427,7 +489,6 @@ export default function Catalog() {
               const f = s.files?.[vk] || { fileName: "", s3Key: "", playbackUrl: "" };
               const key = `song_${s.slot}_${vk}`;
               const isUp = uploadingKey === key;
-
               const inputId = `file_${projectId}_${s.slot}_${vk}`;
 
               return (
@@ -440,9 +501,8 @@ export default function Catalog() {
                     background: "#fafafa",
                   }}
                 >
-                  <div style={{ fontWeight: 600, marginBottom: 6 }}>{vk.toUpperCase()}</div>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>{String(vk).toUpperCase()}</div>
 
-                  {/* Hidden real input */}
                   <input
                     id={inputId}
                     type="file"
@@ -451,7 +511,6 @@ export default function Catalog() {
                     onChange={(e) => onChooseFile(s.slot, vk, e.target.files?.[0] || null)}
                   />
 
-                  {/* Always-clickable trigger */}
                   <button
                     type="button"
                     onClick={() => {
@@ -472,19 +531,19 @@ export default function Catalog() {
                     ) : (
                       <div style={{ opacity: 0.65 }}>No file chosen</div>
                     )}
+                    {f.s3Key ? (
+                      <div style={{ marginTop: 4, opacity: 0.65, wordBreak: "break-word" }}>
+                        s3Key: {f.s3Key}
+                      </div>
+                    ) : null}
                   </div>
 
                   <button
                     style={{ marginTop: 10 }}
-                    onClick={() =>
-                      setAndPlay(
-                        f.playbackUrl,
-                        `#${s.slot} ${vk.toUpperCase()}${s.title ? ` — ${s.title}` : ""}`
-                      )
-                    }
-                    disabled={!f.playbackUrl || isUp}
+                    onClick={() => playVersion(s.slot, vk)}
+                    disabled={isUp || (!f.playbackUrl && !f.s3Key)}
                   >
-                    {isUp ? "Uploading…" : `Play ${vk.toUpperCase()}`}
+                    {isUp ? "Uploading…" : `Play ${String(vk).toUpperCase()}`}
                   </button>
                 </div>
               );
@@ -506,9 +565,7 @@ export default function Catalog() {
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <div style={{ fontWeight: 800 }}>Master Save</div>
-            <div style={{ fontSize: 12, opacity: 0.75 }}>
-              Finalizes Catalog snapshot for this project.
-            </div>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>Finalizes Catalog snapshot for this project.</div>
           </div>
 
           {readOnly ? (
@@ -518,7 +575,6 @@ export default function Catalog() {
           ) : null}
         </div>
 
-        {/* Tiered confirmation */}
         {!readOnly && confirmStep === 1 ? (
           <div
             style={{
@@ -572,11 +628,7 @@ export default function Catalog() {
         {msStatus ? (
           <div style={{ marginTop: 12, fontSize: 12 }}>
             {msStatus}
-            {msSuccessAt ? (
-              <span style={{ marginLeft: 8, opacity: 0.75 }}>
-                ({msSuccessAt})
-              </span>
-            ) : null}
+            {msSuccessAt ? <span style={{ marginLeft: 8, opacity: 0.75 }}>({msSuccessAt})</span> : null}
           </div>
         ) : null}
 
