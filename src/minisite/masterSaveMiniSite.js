@@ -1,26 +1,34 @@
-// FILE: src/lib/masterSaveMiniSite.js
-// Master Save client helper (writes full local project -> backend -> S3)
-//
-// Backend contract (server.js):
-// POST /api/master-save
-// Body: { projectId: string, project: object }
-// Returns: { ok:true, snapshotKey:string, latestKey:string }
+// FILE: src/minisite/masterSaveMiniSite.js
+import { getApiBase } from "../lib/api/apiBase.js";
 
-import { loadProject } from "../minisite/catalog/catalogCore.js";
+function projectKey(projectId) {
+  return `project_${String(projectId || "").trim()}`;
+}
 
-const DEFAULT_API_BASE = String(import.meta.env.VITE_API_BASE || "https://album-backend-c7ed.onrender.com").replace(
-  /\/+$/,
-  ""
-);
+function safeParse(json) {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
 
-export async function masterSaveMiniSite({ projectId, project = null, apiBase = DEFAULT_API_BASE } = {}) {
+function loadProjectLocal(projectId) {
+  const pid = String(projectId || "").trim();
+  if (!pid) return null;
+  const raw = localStorage.getItem(projectKey(pid));
+  const parsed = raw ? safeParse(raw) : null;
+  return parsed && typeof parsed === "object" ? parsed : null;
+}
+
+export async function masterSaveMiniSite({ projectId, project = null, apiBase = "" } = {}) {
   const pid = String(projectId || "").trim();
   if (!pid) throw new Error("masterSaveMiniSite: missing projectId");
 
-  const base = String(apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
+  const base = String(apiBase || getApiBase() || "").replace(/\/+$/, "");
+  if (!base) throw new Error("masterSaveMiniSite: missing api base");
 
-  // If caller didn't pass a project, use the canonical localStorage project_{projectId}.
-  const localProject = project && typeof project === "object" ? project : loadProject(pid);
+  const localProject = project && typeof project === "object" ? project : loadProjectLocal(pid);
   if (!localProject || typeof localProject !== "object") {
     throw new Error(`masterSaveMiniSite: no local project found for projectId=${pid}`);
   }
@@ -28,10 +36,7 @@ export async function masterSaveMiniSite({ projectId, project = null, apiBase = 
   const res = await fetch(`${base}/api/master-save`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      projectId: pid,
-      project: localProject,
-    }),
+    body: JSON.stringify({ projectId: pid, project: localProject }),
   });
 
   const json = await res.json().catch(() => ({}));
