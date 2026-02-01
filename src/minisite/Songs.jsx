@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { useSongsMasterSave } from "./songs/useSongsMasterSave";
 import { BridgePreviewPlayer, ABCTimelinePlayer } from "./songs/components/Players";
-import { loadProject, saveProject } from "./catalog/catalogCore.js";
+import { loadProject, saveProject } from "./catalogCore.js";
 import { requireApiBase, API_BASE as API_BASE_ENV } from "../lib/api/apiBase.js";
 
 const SONG_COUNT = 9;

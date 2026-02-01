@@ -1,19 +1,13 @@
 // FILE: src/minisite/Catalog.jsx
 import React, { useEffect, useMemo, useState } from "react";
-import { useLocation, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { ensureProject, loadProject, setSection } from "./catalogCore.js";
 
 export default function Catalog() {
   const { projectId } = useParams();
-  const qs = new URLSearchParams(useLocation().search || "");
-  const token = qs.get("token") || "";
-
   const pid = String(projectId || "").trim();
 
-  const [project, setProject] = useState(() => (pid ? loadProject(pid) : null));
-  const catalog = project?.catalog || {};
-  const songs = useMemo(() => (Array.isArray(catalog?.songs) ? catalog.songs : []), [catalog]);
-
+  const [project, setProject] = useState(null);
   const [titleDraft, setTitleDraft] = useState("");
 
   useEffect(() => {
@@ -22,43 +16,47 @@ export default function Catalog() {
     setProject(loadProject(pid));
   }, [pid]);
 
+  const songs = useMemo(() => {
+    const arr = project?.catalog?.songs;
+    return Array.isArray(arr) ? arr : [];
+  }, [project]);
+
   function refresh() {
     setProject(loadProject(pid));
   }
 
   function addSong() {
     const t = String(titleDraft || "").trim();
-    if (!t || !pid) return;
+    if (!t) return;
 
     const nextSongs = [
       ...songs,
-      {
-        slot: songs.length + 1,
-        title: t,
-        createdAt: new Date().toISOString(),
-      },
+      { title: t, createdAt: new Date().toISOString() },
     ];
 
-    setSection(pid, "catalog", { ...catalog, songs: nextSongs });
+    setSection(pid, "catalog", { ...(project?.catalog || {}), songs: nextSongs });
     setTitleDraft("");
     refresh();
   }
 
   function removeSong(idx) {
-    if (!pid) return;
     const nextSongs = songs.filter((_, i) => i !== idx);
-    setSection(pid, "catalog", { ...catalog, songs: nextSongs });
+    setSection(pid, "catalog", { ...(project?.catalog || {}), songs: nextSongs });
     refresh();
   }
 
+  if (!pid) return <div style={{ padding: 16 }}>Missing projectId</div>;
+
   return (
-    <div style={{ padding: 12, border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12 }}>
-      <div style={{ fontWeight: 900 }}>Catalog (localStorage)</div>
-      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
-        projectId: <b>{pid || "—"}</b> • token: <span style={{ fontFamily: "monospace" }}>{token || "—"}</span>
+    <div style={{ padding: 16, maxWidth: 900 }}>
+      <div style={{ padding: 12, border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12, marginBottom: 14 }}>
+        <div style={{ fontWeight: 900 }}>CATALOG — TITLES (localStorage)</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+          projectId: <b>{pid}</b>
+        </div>
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         <input
           value={titleDraft}
           onChange={(e) => setTitleDraft(e.target.value)}
@@ -73,7 +71,7 @@ export default function Catalog() {
         </button>
       </div>
 
-      <div style={{ border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12, overflow: "hidden", marginTop: 12 }}>
+      <div style={{ border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12, overflow: "hidden" }}>
         {songs.length === 0 ? (
           <div style={{ padding: 12, opacity: 0.7 }}>No songs yet.</div>
         ) : (
@@ -100,8 +98,8 @@ export default function Catalog() {
         )}
       </div>
 
-      <div style={{ marginTop: 12, fontSize: 12, opacity: 0.6, fontFamily: "monospace" }}>
-        storage key: project_{pid}
+      <div style={{ marginTop: 12, fontSize: 12, opacity: 0.65 }}>
+        Refresh test: add → refresh page → titles must remain.
       </div>
     </div>
   );
