@@ -1,28 +1,38 @@
+// FILE: src/app/routes.jsx
 import React from "react";
-import { Routes, Route } from "react-router-dom";
-import AdminSend from "./AdminSend.jsx";
-import MiniSiteLayout from "../minisite/MiniSiteLayout.jsx";
+import { Routes, Route, Navigate } from "react-router-dom";
 
-function PublicHome() {
-  return (
-    <div style={{ padding: 40 }}>
-      <h1>BlockOne</h1>
-      <p>Public site placeholder.</p>
-    </div>
-  );
-}
+import MiniSiteLayout from "../minisite/MiniSiteLayout.jsx";
+import Catalog from "../minisite/Catalog.jsx";
+import Album from "../minisite/Album.jsx";
+import Songs from "../minisite/Songs.jsx";
+import Meta from "../minisite/Meta.jsx";
+import NFTMix from "../minisite/NFTMix.jsx";
+
+import AdminSend from "./AdminSend.jsx";
 
 export default function AppRoutes() {
   return (
     <Routes>
-      {/* Public root */}
-      <Route path="/" element={<PublicHome />} />
-
       {/* Admin */}
       <Route path="/admin/send" element={<AdminSend />} />
 
-      {/* Producer minisite */}
-      <Route path="/minisite/:projectId/*" element={<MiniSiteLayout />} />
+      {/* Minisite */}
+      <Route path="/minisite" element={<Navigate to="/minisite/000000/catalog" replace />} />
+
+      <Route path="/minisite/:projectId" element={<MiniSiteLayout />}>
+        <Route index element={<Navigate to="catalog" replace />} />
+        <Route path="catalog" element={<Catalog />} />
+        <Route path="album" element={<Album />} />
+        <Route path="songs" element={<Songs />} />
+        <Route path="meta" element={<Meta />} />
+        <Route path="nft-mix" element={<NFTMix />} />
+        <Route path="*" element={<Navigate to="catalog" replace />} />
+      </Route>
+
+      {/* Default: send unknown routes to minisite instead of admin */}
+      <Route path="/" element={<Navigate to="/minisite/000000/catalog" replace />} />
+      <Route path="*" element={<Navigate to="/minisite/000000/catalog" replace />} />
     </Routes>
   );
 }
