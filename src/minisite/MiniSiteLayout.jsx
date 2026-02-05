@@ -1,22 +1,15 @@
 // FILE: src/minisite/MiniSiteLayout.jsx
 import React from "react";
 import { Link, Navigate, useLocation, useParams, useSearchParams } from "react-router-dom";
+import { ProjectMiniSiteProvider } from "../ProjectMiniSiteContext.jsx";
 
-import { ProjectMiniSiteProvider } from "../ProjectMiniSiteContext"; // IMPORTANT: match repo (no .jsx)
 import Catalog from "./Catalog.jsx";
-
-function ComingSoon({ title }) {
-  return (
-    <div style={{ maxWidth: 1120, margin: "0 auto", padding: "16px 0" }}>
-      <h2 style={{ marginTop: 10 }}>{title}</h2>
-      <div style={{ opacity: 0.75, fontSize: 13 }}>Not wired yet.</div>
-    </div>
-  );
-}
+import Songs from "./Songs.jsx";
+import Meta from "./Meta.jsx";
+import NFTMix from "./NFTMix.jsx";
 
 function buildSearch(locationSearch, token, isAdmin) {
   const sp = new URLSearchParams(locationSearch || "");
-
   if (token) sp.set("token", token);
   else sp.delete("token");
 
@@ -36,32 +29,33 @@ export default function MiniSiteLayout() {
   const isAdmin = String(searchParams.get("admin") || "").trim() === "1";
   const isProducerView = Boolean(token) && !isAdmin;
 
-  const pid = String(projectIdParam || "demo").trim() || "demo";
+  const pid = String(projectIdParam ?? "").trim();
+  if (!pid) return <Navigate to="/admin/send" replace />;
 
-  // normalize page param (supports legacy names)
-  const raw = String(page || "catalog").toLowerCase();
-  const alias = raw === "nft-mix" ? "nftmix" : raw;
-  const allowed = new Set(["catalog", "album", "nftmix", "songs", "meta"]);
-  const p = allowed.has(alias) ? alias : "catalog";
+  const p0 = String(page || "").toLowerCase();
+  const pageMap = {
+    catalog: "catalog",
+    songs: "songs",
+    meta: "meta",
+    "nft-mix": "nft-mix",
+    nftmix: "nft-mix",
+  };
+  const p = pageMap[p0] || "";
 
   const search = buildSearch(location.search, token, isAdmin);
 
-  if (!allowed.has(alias) && raw !== "catalog") {
-    return <Navigate to={`/minisite/${encodeURIComponent(pid)}/catalog${search}`} replace />;
-  }
+  if (!p) return <Navigate to={`/minisite/${encodeURIComponent(pid)}/catalog${search}`} replace />;
 
   const tabs = [
     { key: "catalog", label: "Catalog" },
-    { key: "album", label: "Album" },
-    { key: "nftmix", label: "NFT Mix" },
     { key: "songs", label: "Songs" },
     { key: "meta", label: "Meta" },
+    { key: "nft-mix", label: "NFT Mix" },
   ];
 
   return (
     <ProjectMiniSiteProvider projectId={pid}>
       <div style={{ minHeight: "100vh", background: "#ffffff", color: "#111" }}>
-        {/* Header */}
         <div
           style={{
             borderBottom: "1px solid rgba(0,0,0,0.12)",
@@ -83,10 +77,8 @@ export default function MiniSiteLayout() {
               flexWrap: "wrap",
             }}
           >
-            {/* Title + project line */}
             <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
               <div style={{ fontWeight: 800, letterSpacing: 0.2 }}>EXECUTIVE PRODUCTION SUITE</div>
-
               <div style={{ fontSize: 11, opacity: 0.75 }}>
                 Project: <b>{pid}</b>
                 {!isProducerView ? (
@@ -99,7 +91,6 @@ export default function MiniSiteLayout() {
               </div>
             </div>
 
-            {/* Tabs */}
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
               {tabs.map((t) => {
                 const active = t.key === p;
@@ -126,13 +117,11 @@ export default function MiniSiteLayout() {
           </div>
         </div>
 
-        {/* Body */}
         <div style={{ maxWidth: 1120, margin: "0 auto", padding: "0 16px" }}>
           {p === "catalog" ? <Catalog /> : null}
-          {p === "album" ? <ComingSoon title="Album" /> : null}
-          {p === "nftmix" ? <ComingSoon title="NFT Mix" /> : null}
-          {p === "songs" ? <ComingSoon title="Songs" /> : null}
-          {p === "meta" ? <ComingSoon title="Meta" /> : null}
+          {p === "songs" ? <Songs /> : null}
+          {p === "meta" ? <Meta /> : null}
+          {p === "nft-mix" ? <NFTMix /> : null}
         </div>
       </div>
     </ProjectMiniSiteProvider>
