@@ -1,33 +1,28 @@
-// FILE: src/app/routes.jsx
 import React from "react";
-import { Routes, Route, Navigate } from "react-router-dom";
-
-import AppLayout from "./AppLayout.jsx";
+import { Routes, Route } from "react-router-dom";
 import AdminSend from "./AdminSend.jsx";
-
-import Projects from "../pages/Projects.jsx";
-// import Project from "../pages/Project.jsx"; // optional if you want it
 import MiniSiteLayout from "../minisite/MiniSiteLayout.jsx";
+
+function PublicHome() {
+  return (
+    <div style={{ padding: 40 }}>
+      <h1>BlockOne</h1>
+      <p>Public site placeholder.</p>
+    </div>
+  );
+}
 
 export default function AppRoutes() {
   return (
     <Routes>
-      {/* Root should NOT go to /admin/send */}
-      <Route path="/" element={<Navigate to="/admin" replace />} />
+      {/* Public root */}
+      <Route path="/" element={<PublicHome />} />
 
-      {/* ADMIN area with sidebar */}
-      <Route path="/admin" element={<AppLayout />}>
-        <Route index element={<Projects />} />
-        <Route path="send" element={<AdminSend />} />
-        {/* Add more admin routes here as needed */}
-        {/* <Route path="project/:projectId" element={<Project />} /> */}
-      </Route>
+      {/* Admin */}
+      <Route path="/admin/send" element={<AdminSend />} />
 
-      {/* MINISITE */}
-      <Route path="/minisite/:projectId/:page" element={<MiniSiteLayout />} />
-
-      {/* Fallback */}
-      <Route path="*" element={<Navigate to="/admin" replace />} />
+      {/* Producer minisite */}
+      <Route path="/minisite/:projectId/*" element={<MiniSiteLayout />} />
     </Routes>
   );
 }
