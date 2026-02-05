@@ -2,7 +2,7 @@
 import React from "react";
 import { Link, Navigate, useLocation, useParams, useSearchParams } from "react-router-dom";
 
-import { ProjectMiniSiteProvider } from "../ProjectMiniSiteContext.jsx";
+import { ProjectMiniSiteProvider } from "../ProjectMiniSiteContext"; // IMPORTANT: match repo (no .jsx)
 import Catalog from "./Catalog.jsx";
 
 function ComingSoon({ title }) {
@@ -16,6 +16,7 @@ function ComingSoon({ title }) {
 
 function buildSearch(locationSearch, token, isAdmin) {
   const sp = new URLSearchParams(locationSearch || "");
+
   if (token) sp.set("token", token);
   else sp.delete("token");
 
@@ -37,14 +38,15 @@ export default function MiniSiteLayout() {
 
   const pid = String(projectIdParam || "demo").trim() || "demo";
 
-  // Normalize allowed pages
-  const p = String(page || "catalog").toLowerCase();
+  // normalize page param (supports legacy names)
+  const raw = String(page || "catalog").toLowerCase();
+  const alias = raw === "nft-mix" ? "nftmix" : raw;
   const allowed = new Set(["catalog", "album", "nftmix", "songs", "meta"]);
+  const p = allowed.has(alias) ? alias : "catalog";
 
-  // Preserve token/admin params (and any other existing params) consistently
   const search = buildSearch(location.search, token, isAdmin);
 
-  if (!allowed.has(p)) {
+  if (!allowed.has(alias) && raw !== "catalog") {
     return <Navigate to={`/minisite/${encodeURIComponent(pid)}/catalog${search}`} replace />;
   }
 
@@ -90,8 +92,7 @@ export default function MiniSiteLayout() {
                 {!isProducerView ? (
                   <>
                     {" "}
-                    • Token:{" "}
-                    <span style={{ fontFamily: "monospace" }}>{token || "—"}</span>
+                    • Token: <span style={{ fontFamily: "monospace" }}>{token || "—"}</span>
                     {isAdmin ? <span style={{ marginLeft: 8 }}>(admin)</span> : null}
                   </>
                 ) : null}
@@ -109,9 +110,7 @@ export default function MiniSiteLayout() {
                     style={{
                       padding: "8px 12px",
                       borderRadius: 12,
-                      border: active
-                        ? "1px solid rgba(26,115,232,0.45)"
-                        : "1px solid rgba(0,0,0,0.18)",
+                      border: active ? "1px solid rgba(26,115,232,0.45)" : "1px solid rgba(0,0,0,0.18)",
                       background: active ? "rgba(26,115,232,0.10)" : "#ffffff",
                       textDecoration: "none",
                       color: "#111",
