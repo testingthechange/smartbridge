@@ -8,8 +8,8 @@ import MiniSiteLayout from "../minisite/MiniSiteLayout.jsx";
 export default function AppRoutes() {
   return (
     <Routes>
-      {/* Public root */}
-      <Route path="/" element={<Navigate to="/admin/send" replace />} />
+      {/* Root: send to minisite entry (no fake 000000; requires explicit projectId) */}
+      <Route path="/" element={<Navigate to="/minisite/211175/catalog" replace />} />
 
       {/* Admin */}
       <Route path="/admin/send" element={<AdminSend />} />
