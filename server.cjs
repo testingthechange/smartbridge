@@ -242,9 +242,9 @@ app.get("/api/public/manifest/:shareId", async (req, res) => {
     const shareId = String(req.params?.shareId || "").trim();
     if (!shareId) return res.status(400).json({ ok: false, error: "missing_shareId" });
 
-    // 1) Look up the published index for this shareId
     const indexKey = `storage/public/manifests/${shareId}.json`;
     const index = await getJson(indexKey);
+
     if (!index || typeof index !== "object") {
       return res.status(404).json({ ok: false, error: "share_not_found", shareId });
     }
@@ -252,7 +252,6 @@ app.get("/api/public/manifest/:shareId", async (req, res) => {
     const projectId = String(index.projectId || "").trim() || null;
     const publishedAt = String(index.publishedAt || index.createdAt || index.updatedAt || "").trim() || null;
 
-    // 2) Resolve snapshotKey
     let snapshotKey = String(index.snapshotKey || index.latestSnapshotKey || "").trim();
     let latestKey = String(index.latestKey || "").trim();
 
@@ -271,7 +270,6 @@ app.get("/api/public/manifest/:shareId", async (req, res) => {
       return res.status(404).json({ ok: false, error: "no_snapshot_for_share", shareId, indexKey });
     }
 
-    // 3) Load the snapshot and pull the bundle
     const snapshot = await getJson(snapshotKey);
     const bundle =
       snapshot?.project ||
