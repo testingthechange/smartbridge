@@ -9,7 +9,23 @@ const multer = require("multer");
 const upload = multer({ storage: multer.memoryStorage() });
 
 // Storage helpers (S3/R2-compatible)
-const { saveFileToR2, putJson, getJson } = require("./storage.cjs");
+let saveFileToR2, putJson, getJson;
+try {
+  const storage = require("./storage.cjs");
+  saveFileToR2 = storage.saveFileToR2;
+  putJson = storage.putJson;
+  getJson = storage.getJson || storage.getJSON;
+} catch (e) {
+  console.warn("storage.cjs failed to load:", e?.message || e);
+}
+saveFileToR2 = saveFileToR2 || (async () => {
+  throw new Error("saveFileToR2 unavailable");
+});
+putJson = putJson || (async () => {
+  throw new Error("putJson unavailable");
+});
+getJson = getJson || (async () => null);
+
 
 const app = express();
 const port = process.env.PORT || 3000;
