@@ -239,87 +239,65 @@ function makePublicManifest({ shareId, projectId, publishedAt, bundle, lineage }
 
 app.get("/api/public/manifest/:shareId", async (req, res) => {
   try {
-    const shareId = safeString(req.params?.shareId);
+    const shareId = String(req.params?.shareId || "").trim();
     if (!shareId) return res.status(400).json({ ok: false, error: "missing_shareId" });
 
+    // 1) Look up the published index for this shareId
     const indexKey = `storage/public/manifests/${shareId}.json`;
     const index = await getJson(indexKey);
-
     if (!index || typeof index !== "object") {
       return res.status(404).json({ ok: false, error: "share_not_found", shareId });
     }
 
-    const projectId = safeString(index.projectId);
-    const publishedAt = safeString(index.publishedAt || index.createdAt || index.updatedAt);
+    const projectId = String(index.projectId || "").trim() || null;
+    const publishedAt = String(index.publishedAt || index.createdAt || index.updatedAt || "").trim() || null;
 
-    let snapshotKey = safeString(index.snapshotKey || index.latestSnapshotKey);
-    let latestKey = safeString(index.latestKey);
+    // 2) Resolve snapshotKey
+    let snapshotKey = String(index.snapshotKey || index.latestSnapshotKey || "").trim();
+    let latestKey = String(index.latestKey || "").trim();
 
     if (!snapshotKey && latestKey) {
       const latest = await getJson(latestKey);
-      snapshotKey = safeString(latest?.latestSnapshotKey || latest?.snapshotKey);
+      snapshotKey = String(latest?.latestSnapshotKey || latest?.snapshotKey || "").trim();
     }
 
     if (!snapshotKey && projectId) {
       latestKey = latestKey || `storage/projects/${projectId}/producer_returns/latest.json`;
       const latest = await getJson(latestKey);
-      snapshotKey = safeString(latest?.latestSnapshotKey || latest?.snapshotKey);
+      snapshotKey = String(latest?.latestSnapshotKey || latest?.snapshotKey || "").trim();
     }
 
     if (!snapshotKey) {
       return res.status(404).json({ ok: false, error: "no_snapshot_for_share", shareId, indexKey });
     }
 
+    // 3) Load the snapshot and pull the bundle
     const snapshot = await getJson(snapshotKey);
-    const bundle = snapshot?.project || snapshot?.data || snapshot?.project?.data || snapshot?.bundle || null;
-
-    const lineage = {
-      indexKey,
-      latestKey: latestKey || null,
-      snapshotKey,
-      sourceSavedAt: safeString(snapshot?.createdAt || index?.savedAt || null),
-    };
-
-    const manifest = makePublicManifest({ shareId, projectId, publishedAt, bundle, lineage });
-    return res.json({ ok: true, manifest });
-  } catch (err) {
-    console.error("public manifest error:", err);
-    return res.status(500).json({ ok: false, error: err?.message || String(err) });
-  }
-});
-app.post("/api/publish/final/:projectId", async (req, res) => {
-  try {
-    const projectId = String(req.params?.projectId || "").trim();
-    if (!projectId) return res.status(400).json({ ok: false, error: "missing_projectId" });
-
-    // Use latest master-save snapshot
-    const latestKey = `storage/projects/${projectId}/producer_returns/latest.json`;
-    const latest = await getJson(latestKey);
-    const snapshotKey = String(latest?.latestSnapshotKey || latest?.snapshotKey || "").trim();
-    if (!snapshotKey) return res.status(404).json({ ok: false, error: "NO_LATEST_SNAPSHOT_KEY", latestKey });
-
-    const shareId =
-      Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 12);
-    const publishedAt = new Date().toISOString();
-
-    const indexKey = `storage/public/manifests/${shareId}.json`;
-
-    await putJson(indexKey, {
-      shareId,
-      projectId,
-      publishedAt,
-      latestKey,
-      snapshotKey,
-      source: "publish-final",
-    });
+    const bundle =
+      snapshot?.project ||
+      snapshot?.data ||
+      snapshot?.project?.data ||
+      snapshot?.bundle ||
+      {};
 
     return res.json({
       ok: true,
-      projectId,
-      final: { shareId, publishedAt, indexKey, latestKey, snapshotKey, shareUrl: `/public/players/${shareId}` },
+      manifest: {
+        version: "PUBLIC_BUNDLE_V1",
+        shareId,
+        projectId,
+        publishedAt,
+        bundle,
+        lineage: {
+          indexKey,
+          latestKey: latestKey || null,
+          snapshotKey,
+          sourceSavedAt: snapshot?.createdAt || index?.savedAt || null,
+        },
+      },
     });
   } catch (err) {
-    console.error("publish final error:", err);
+    console.error("public manifest error:", err);
     return res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
