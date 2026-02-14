@@ -287,6 +287,42 @@ app.get("/api/public/manifest/:shareId", async (req, res) => {
     return res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
+app.post("/api/publish/final/:projectId", async (req, res) => {
+  try {
+    const projectId = String(req.params?.projectId || "").trim();
+    if (!projectId) return res.status(400).json({ ok: false, error: "missing_projectId" });
+
+    // Use latest master-save snapshot
+    const latestKey = `storage/projects/${projectId}/producer_returns/latest.json`;
+    const latest = await getJson(latestKey);
+    const snapshotKey = String(latest?.latestSnapshotKey || latest?.snapshotKey || "").trim();
+    if (!snapshotKey) return res.status(404).json({ ok: false, error: "NO_LATEST_SNAPSHOT_KEY", latestKey });
+
+    const shareId =
+      Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 12);
+    const publishedAt = new Date().toISOString();
+
+    const indexKey = `storage/public/manifests/${shareId}.json`;
+
+    await putJson(indexKey, {
+      shareId,
+      projectId,
+      publishedAt,
+      latestKey,
+      snapshotKey,
+      source: "publish-final",
+    });
+
+    return res.json({
+      ok: true,
+      projectId,
+      final: { shareId, publishedAt, indexKey, latestKey, snapshotKey, shareUrl: `/public/players/${shareId}` },
+    });
+  } catch (err) {
+    console.error("publish final error:", err);
+    return res.status(500).json({ ok: false, error: err?.message || String(err) });
+  }
+});
 
 // ---------- PUBLISH (stub) ----------
 app.post("/api/publish-minisite", (req, res) => {
