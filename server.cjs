@@ -8,24 +8,9 @@ const { Pool } = require("pg");
 const multer = require("multer");
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Storage helpers (S3/R2-compatible)
-let saveFileToR2, putJson, getJson;
-try {
-  const storage = require("./storage.cjs");
-  saveFileToR2 = storage.saveFileToR2;
-  putJson = storage.putJson;
-  getJson = storage.getJson || storage.getJSON;
-} catch (e) {
-  console.warn("storage.cjs failed to load:", e?.message || e);
-}
-saveFileToR2 = saveFileToR2 || (async () => {
-  throw new Error("saveFileToR2 unavailable");
-});
-putJson = putJson || (async () => {
-  throw new Error("putJson unavailable");
-});
-getJson = getJson || (async () => null);
-
+// S3-compatible JSON + file helpers (works for AWS S3 / R2 if env/creds set)
+const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -51,6 +36,67 @@ app.use(
 );
 
 app.use(express.json({ limit: "25mb" }));
+
+// ---------- S3/R2 ----------
+const AWS_REGION = process.env.AWS_REGION || "us-west-1";
+const S3_BUCKET = process.env.S3_BUCKET || process.env.AWS_S3_BUCKET || "";
+const SIGNED_URL_EXPIRES_SECONDS = Number(process.env.SIGNED_URL_EXPIRES_SECONDS || 1200);
+
+const s3 = new S3Client({ region: AWS_REGION });
+
+function must(v, msg) {
+  if (!v) throw new Error(msg);
+  return v;
+}
+
+async function streamToBuffer(readable) {
+  const chunks = [];
+  for await (const c of readable) chunks.push(c);
+  return Buffer.concat(chunks);
+}
+
+async function putJson(key, obj) {
+  const bucket = must(S3_BUCKET, "Missing env S3_BUCKET (or AWS_S3_BUCKET)");
+  const Body = Buffer.from(JSON.stringify(obj, null, 2));
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body,
+      ContentType: "application/json",
+    })
+  );
+  return { bucket, key };
+}
+
+async function getJson(key) {
+  const bucket = must(S3_BUCKET, "Missing env S3_BUCKET (or AWS_S3_BUCKET)");
+  const out = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  const buf = await streamToBuffer(out.Body);
+  return JSON.parse(buf.toString("utf8"));
+}
+
+async function saveFileToR2({ key, contentType, body }) {
+  // name kept for compatibility; works on S3/R2
+  const bucket = must(S3_BUCKET, "Missing env S3_BUCKET (or AWS_S3_BUCKET)");
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: body,
+      ContentType: contentType || "application/octet-stream",
+    })
+  );
+
+  // Signed URL for playback/download
+  const signed = await getSignedUrl(
+    s3,
+    new GetObjectCommand({ Bucket: bucket, Key: key }),
+    { expiresIn: SIGNED_URL_EXPIRES_SECONDS }
+  );
+
+  return signed;
+}
 
 // ---------- DATABASE ----------
 const pool = new Pool({
@@ -164,7 +210,7 @@ app.post("/api/projects/:projectId/songs/:songId/upload", upload.single("file"),
     res.json({ ok: true, url });
   } catch (err) {
     console.error("upload failed", err);
-    res.status(500).json({ ok: false, error: "UPLOAD_FAILED" });
+    res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
 
@@ -236,7 +282,6 @@ app.get("/api/master-save/latest/:projectId", async (req, res) => {
   }
 });
 
-rg -n "public/manifest" -S .
 /* ------------------------------ Public Manifest (PUBLIC_BUNDLE_V1) ------------------------------ */
 function safeString(v) {
   return String(v ?? "").trim();
@@ -287,29 +332,22 @@ app.get("/api/public/manifest/:shareId", async (req, res) => {
     }
 
     const snapshot = await getJson(snapshotKey);
-    const bundle =
-      snapshot?.project ||
-      snapshot?.data ||
-      snapshot?.project?.data ||
-      snapshot?.bundle ||
-      {};
+    const bundle = snapshot?.project || snapshot?.data || snapshot?.project?.data || snapshot?.bundle || {};
 
-    return res.json({
-      ok: true,
-      manifest: {
-        version: "PUBLIC_BUNDLE_V1",
-        shareId,
-        projectId,
-        publishedAt,
-        bundle,
-        lineage: {
-          indexKey,
-          latestKey: latestKey || null,
-          snapshotKey,
-          sourceSavedAt: snapshot?.createdAt || index?.savedAt || null,
-        },
+    const manifest = makePublicManifest({
+      shareId,
+      projectId,
+      publishedAt,
+      bundle,
+      lineage: {
+        indexKey,
+        latestKey: latestKey || null,
+        snapshotKey,
+        sourceSavedAt: snapshot?.createdAt || index?.savedAt || null,
       },
     });
+
+    return res.json({ ok: true, manifest });
   } catch (err) {
     console.error("public manifest error:", err);
     return res.status(500).json({ ok: false, error: err?.message || String(err) });
